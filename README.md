@@ -4,11 +4,9 @@
   <img src="assets/logo-full.png" alt="Lammergeier logo" width="420">
 </p>
 
-`lams3` is a small Lammergeier package for S3-compatible object storage.
+`lams3` is a small [Lammergeier Programming Language](https://github.com/thallium-solutions/lammergeier-lang) package for S3-compatible object storage.
 It targets AWS S3-style APIs and S3-compatible providers such as Cloudflare R2,
 MinIO, Wasabi, Backblaze B2, and custom gateways.
-
-Canonical repository: [thallium-solutions/lams3](https://github.com/thallium-solutions/lams3).
 
 It is currently mirrored under `third_party/` with its own `lamlib.toml`, tests,
 and README so it can be used as a normal external Lam library while the package
