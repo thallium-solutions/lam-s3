@@ -1,8 +1,3 @@
-# Soon to be removed from here
-
-Check the new repository [thallium-solutions/lams3](https://github.com/thallium-solutions/lams3)
-
-
 # lams3
 
 <p align="center">
