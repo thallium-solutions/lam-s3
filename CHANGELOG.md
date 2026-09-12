@@ -1,6 +1,22 @@
-# lams3 Changelog
+# @lam/s3 Changelog
 
-All notable changes to lams3 are documented here.
+All notable changes to `@lam/s3` are documented here.
+
+## 2026-09-12
+
+### Changed
+
+- Renamed the canonical library module from `lams3` to `@lam/s3` and updated the
+  manifest, imports, tests, and documentation for the scoped package name.
+- Updated the test runner to use `lamc` from `PATH`, require a compatible
+  compiler before running, and stage the standalone checkout in the scoped
+  extlibs layout expected by Lammergeier.
+- Updated README paths and commands for the standalone `lam-s3` repository.
+
+### Fixed
+
+- Adjusted the presigned URL regression test to use compiler-supported string
+  method syntax.
 
 ## 2026-07-11
 

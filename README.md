@@ -1,16 +1,12 @@
-# lams3
+# @lam/s3
 
 <p align="center">
   <img src="assets/logo-full.png" alt="Lammergeier logo" width="420">
 </p>
 
-`lams3` is a small [Lammergeier Programming Language](https://github.com/thallium-solutions/lammergeier-lang) package for S3-compatible object storage.
+`@lam/s3` is a small [Lammergeier Programming Language](https://github.com/thallium-solutions/lammergeier-lang) package for S3-compatible object storage.
 It targets AWS S3-style APIs and S3-compatible providers such as Cloudflare R2,
 MinIO, Wasabi, Backblaze B2, and custom gateways.
-
-It is currently mirrored under `third_party/` with its own `lamlib.toml`, tests,
-and README so it can be used as a normal external Lam library while the package
-is being moved out of this repository.
 
 ## What you get
 
@@ -34,13 +30,13 @@ is being moved out of this repository.
 ## Package layout
 
 ```text
-lams3/
+lam-s3/
 ├── __init__.lam              # Public package API
 ├── lamlib.toml               # Library metadata and Go SDK pins
 ├── README.md                 # This guide
 ├── CHANGELOG.md              # Package-specific release notes
 ├── LICENSE                   # Apache License 2.0 text
-├── NOTICE                    # lams3 attribution notices
+├── NOTICE                    # @lam/s3 attribution notices
 ├── .env.example              # Safe environment template
 ├── assets/
 │   └── logo-full.png         # Lammergeier official logo for README rendering
@@ -49,6 +45,18 @@ lams3/
     ├── live_roundtrip.lam    # Optional real S3/R2 integration test
     └── run_lams3_tests.py    # Package-specific test runner
 ```
+
+## Installation
+
+`@lam/s3` requires `lamc` 0.1.0 or newer. From your application project,
+install a local checkout with:
+
+```bash
+lamc install /path/to/lam-s3
+```
+
+The installer uses the canonical `@lam/s3` name from `lamlib.toml`, so consumers
+can use the scoped imports shown below regardless of the checkout directory name.
 
 ## Configuration
 
@@ -80,8 +88,8 @@ export S3_USE_PATH_STYLE="true"
 ## Quick start
 
 ```lammergeier
-from lams3 import S3
-from lams3 import S3Client
+from @lam/s3 import S3
+from @lam/s3 import S3Client
 
 func main() {
     if not S3.hasEnv() {
@@ -106,7 +114,7 @@ Use direct configuration when your app already has a config object, secret
 manager, or tenant-specific credentials:
 
 ```lammergeier
-from lams3 import S3Client
+from @lam/s3 import S3Client
 
 func main() {
     s3: S3Client = S3Client.connect(
@@ -126,7 +134,7 @@ func main() {
 If you prefer to pass a config object:
 
 ```lammergeier
-from lams3 import S3Client, S3Config
+from @lam/s3 import S3Client, S3Config
 
 func main() {
     cfg: S3Config = S3Config("key", "secret", "endpoint.example.com", "bucket")
@@ -138,7 +146,7 @@ func main() {
 For error-aware flows, use the `try*` methods with `?` inside `do/catch`:
 
 ```lammergeier
-from lams3 import S3Client
+from @lam/s3 import S3Client
 
 func main() {
     s3: S3Client = S3Client.fromEnv()
@@ -158,7 +166,7 @@ func main() {
 ### Files, buffers, streams, and metadata
 
 ```lammergeier
-from lams3 import S3Client, S3Object
+from @lam/s3 import S3Client, S3Object
 from lamos import Os
 
 go! {
@@ -196,13 +204,6 @@ For more complete examples, read the test cases:
 - `tests/offline_presign_urls.lam` shows presigned URL generation.
 - `tests/live_roundtrip.lam` exercises text, files, buffers, streams, stat,
   copy, move, list, presign, and bulk cleanup against a real bucket.
-
-When compiling directly from this repository, point the compiler at
-`third_party` as the external-library root:
-
-```bash
-/usr/bin/python3 compiler/lammergeier.py app.lam --extlibs third_party -o app
-```
 
 ## API reference
 
@@ -296,7 +297,7 @@ Objects returned by `list` expose:
 Offline tests compile and run without credentials:
 
 ```bash
-/usr/bin/python3 third_party/lams3/tests/run_lams3_tests.py --verbose
+python3 tests/run_lams3_tests.py --verbose
 ```
 
 Live tests use the dedicated `lams3-tests/live-roundtrip/` prefix and perform
@@ -311,7 +312,7 @@ export S3_ENDPOINT="..."
 export S3_PUBLIC_ENDPOINT="..."
 export S3_REGION="auto"
 export S3_BUCKET="..."
-/usr/bin/python3 third_party/lams3/tests/run_lams3_tests.py --live --verbose
+python3 tests/run_lams3_tests.py --live --verbose
 ```
 
 ## Notes
@@ -326,6 +327,6 @@ export S3_BUCKET="..."
 
 ## License and changelog
 
-lams3 is Copyright 2026 Thallium Solutions di Busconi Alessandro and is
+@lam/s3 is Copyright 2026 Thallium Solutions di Busconi Alessandro and is
 distributed under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`
 in this directory. Package-specific release notes live in `CHANGELOG.md`.

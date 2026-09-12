@@ -5,9 +5,9 @@
 # expect: false
 # expect: S3_BUCKET is required
 
-from lams3 import S3
-from lams3 import S3Client
-from lams3 import S3Config
+from @lam/s3 import S3
+from @lam/s3 import S3Client
+from @lam/s3 import S3Config
 from lamerrors import Result, Error
 
 func main() {

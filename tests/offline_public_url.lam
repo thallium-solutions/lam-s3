@@ -1,6 +1,6 @@
 # expect: https://test-bucket.storage-ts.com/folder/file%20name.txt
 
-from lams3 import S3
+from @lam/s3 import S3
 
 func main() {
     print(S3.publicUrl("test-bucket.storage-ts.com", "folder/file name.txt"))

@@ -1,6 +1,6 @@
 # expect: https://cdn.example.com/client/file%20name.txt
 
-from lams3 import S3Client
+from @lam/s3 import S3Client
 from lamenv import Env
 
 func main() {

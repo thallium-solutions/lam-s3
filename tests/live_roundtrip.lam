@@ -11,9 +11,9 @@
 # expect: cleanup=true
 # expect: live_roundtrip_ok
 
-from lams3 import S3
-from lams3 import S3Client
-from lams3 import S3Object
+from @lam/s3 import S3
+from @lam/s3 import S3Client
+from @lam/s3 import S3Object
 from lamenv import Env
 from lamos import Os
 
@@ -51,7 +51,7 @@ func main() {
     streamKey: str = prefix + "stream.txt"
     preCleanKeys: list[str] = [key, copyKey, movedKey, uploadKey, bufferKey, streamKey]
     cleanupKeys: list[str] = [key, movedKey, uploadKey, bufferKey, streamKey]
-    body: str = "hello from lams3"
+    body: str = "hello from @lam/s3"
 
     _ = client.deleteMany(preCleanKeys)
 

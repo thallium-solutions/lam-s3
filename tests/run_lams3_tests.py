@@ -15,8 +15,49 @@ from pathlib import Path
 
 LIB_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = LIB_ROOT.parents[1]
-COMPILER = PROJECT_ROOT / "compiler" / "lammergeier.py"
-PYTHON = sys.executable
+COMPILER = "lamc"
+MIN_COMPILER_VERSION = (0, 1, 0)
+PACKAGE_PATH = Path("@lam") / "s3"
+
+
+def _check_compiler() -> bool:
+    try:
+        version_proc = subprocess.run(
+            [COMPILER, "version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        print(f"Error: {COMPILER} is not installed or not available on PATH.", file=sys.stderr)
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"Error: {COMPILER} version check timed out.", file=sys.stderr)
+        return False
+
+    if version_proc.returncode != 0:
+        detail = version_proc.stderr.strip()
+        message = f"Error: unable to check {COMPILER} version"
+        if detail:
+            message += f": {detail}"
+        print(message + ".", file=sys.stderr)
+        return False
+
+    version_text = version_proc.stdout.strip()
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version_text)
+    if not match:
+        print(f"Error: {COMPILER} returned an invalid version: {version_text!r}.", file=sys.stderr)
+        return False
+
+    version = tuple(int(part) for part in match.groups())
+    if version < MIN_COMPILER_VERSION:
+        required = ".".join(str(part) for part in MIN_COMPILER_VERSION)
+        print(
+            f"Error: {COMPILER} {version_text} is incompatible; version >= {required} is required.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _expectations(source: str) -> list[str]:
@@ -32,9 +73,13 @@ def _run_case(path: Path) -> tuple[bool, str]:
     source = path.read_text(encoding="utf-8")
     expected = _expectations(source)
     with tempfile.TemporaryDirectory(prefix="lams3_test_") as tmp:
-        binary = Path(tmp) / "test_binary"
+        tmp_path = Path(tmp)
+        package = tmp_path / "extlibs" / PACKAGE_PATH
+        package.parent.mkdir(parents=True)
+        package.symlink_to(LIB_ROOT, target_is_directory=True)
+        binary = tmp_path / "test_binary"
         compile_proc = subprocess.run(
-            [PYTHON, str(COMPILER), str(path), "--extlibs", str(LIB_ROOT.parent), "-o", str(binary)],
+            [COMPILER, str(path), "--extlibs", str(tmp_path / "extlibs"), "-o", str(binary)],
             cwd=str(PROJECT_ROOT),
             capture_output=True,
             text=True,
@@ -61,10 +106,13 @@ def _run_case(path: Path) -> tuple[bool, str]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="lams3 package tests")
+    ap = argparse.ArgumentParser(description="@lam/s3 package tests")
     ap.add_argument("--live", action="store_true", help="include live S3/R2 tests")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
+
+    if not _check_compiler():
+        sys.exit(1)
 
     cases = sorted((LIB_ROOT / "tests").glob("offline_*.lam"))
     if args.live:
@@ -72,7 +120,7 @@ def main() -> None:
 
     passed = 0
     failures: list[tuple[Path, str]] = []
-    print(f"Running {len(cases)} lams3 test(s)...\n")
+    print(f"Running {len(cases)} @lam/s3 test(s)...\n")
     for case in cases:
         ok, msg = _run_case(case)
         rel = case.relative_to(LIB_ROOT)
@@ -86,7 +134,7 @@ def main() -> None:
                 for line in msg.splitlines():
                     print(f"        {line}")
 
-    print(f"\nLams3 results: {passed} passed, {len(failures)} failed, {len(cases)} total")
+    print(f"\n@lam/s3 results: {passed} passed, {len(failures)} failed, {len(cases)} total")
     if failures and not args.verbose:
         for case, msg in failures:
             print(f"  FAIL {case.relative_to(LIB_ROOT)}")

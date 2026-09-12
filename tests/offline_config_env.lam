@@ -8,8 +8,8 @@
 # expect: bucket
 # expect: true
 
-from lams3 import S3
-from lams3 import S3Config
+from @lam/s3 import S3
+from @lam/s3 import S3Config
 from lamenv import Env
 
 func clearS3Env() {

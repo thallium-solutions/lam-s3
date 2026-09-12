@@ -5,7 +5,7 @@
 # expect: true
 # expect: 0
 
-from lams3 import S3Object
+from @lam/s3 import S3Object
 
 func main() {
     obj: S3Object = S3Object()
