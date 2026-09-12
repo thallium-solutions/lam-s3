@@ -1,12 +1,12 @@
 [library]
 name = "@lam/s3"
-version = "0.1.0"
+version = "1.0.0"
 description = "S3-compatible object storage client for Lammergeier"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]
 
 [compatibility]
-lamc = ">=0.1.0"
+lamc = ">=1.15.0"
 
 [go-deps]
 "github.com/aws/aws-sdk-go-v2" = "v1.42.1"
