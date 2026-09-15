@@ -4,9 +4,15 @@ version = "1.0.0"
 description = "S3-compatible object storage client for Lammergeier"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]
+repository = "https://github.com/thallium-solutions/lam-s3"
+homepage = "https://github.com/thallium-solutions/lam-s3"
 
 [compatibility]
-lamc = ">=1.15.0"
+lamc = "^1.16"
+
+[scripts]
+test = "python3 tests/run_lams3_tests.py"
+format = "lamc fmt ."
 
 [go-deps]
 "github.com/aws/aws-sdk-go-v2" = "v1.42.1"

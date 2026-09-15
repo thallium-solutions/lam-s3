@@ -3,7 +3,7 @@
 # expect: true
 # expect: true
 # expect: true
-# expect: https://cdn.example.com/assets/lams3-tests/presigned/file%20name.txt
+# expect: https://cdn.example.com/assets/lam-s3-tests/presigned/file%20name.txt
 
 from @lam/s3 import S3Client
 from lamenv import Env
@@ -30,12 +30,12 @@ func main() {
     Env.set("S3_USE_PATH_STYLE", "true")
 
     client: S3Client = S3Client.fromEnv()
-    key: str = "lams3-tests/presigned/file name.txt"
+    key: str = "lam-s3-tests/presigned/file name.txt"
 
     getRes: Result = client.presignGet(key, 60)
     getUrl: str = str(getRes.value)
     print(getRes.ok())
-    print(getUrl.contains("lams3-tests/presigned/file%20name.txt"))
+    print(getUrl.contains("lam-s3-tests/presigned/file%20name.txt"))
     print(getUrl.contains("X-Amz-Signature="))
 
     putRes: Result = client.presignPut(key, "text/plain", 60)

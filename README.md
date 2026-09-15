@@ -48,15 +48,24 @@ lam-s3/
 
 ## Installation
 
-`@lam/s3` requires `lamc` 0.1.0 or newer. From your application project,
-install a local checkout with:
+`@lam/s3` requires Lam 1.16 or newer. Install Lam from the main
+[Lammergeier language repository](https://github.com/thallium-solutions/lammergeier-lang),
+then choose one of these package sources from your application project:
 
 ```bash
+# Local path
 lamc install /path/to/lam-s3
+
+# Git
+lamc install https://github.com/thallium-solutions/lam-s3.git
+
+# Registry
+lamc install @lam/s3
 ```
 
 The installer uses the canonical `@lam/s3` name from `lamlib.toml`, so consumers
-can use the scoped imports shown below regardless of the checkout directory name.
+can use the scoped imports shown below regardless of the source form or checkout
+directory name.
 
 ## Configuration
 
@@ -300,12 +309,12 @@ Offline tests compile and run without credentials:
 python3 tests/run_lams3_tests.py --verbose
 ```
 
-Live tests use the dedicated `lams3-tests/live-roundtrip/` prefix and perform
+Live tests use the dedicated `lam-s3-tests/live-roundtrip/` prefix and perform
 upload, read, copy, move, list, file upload/download, presigned URL generation,
 and bulk delete operations against the configured bucket:
 
 ```bash
-export LAMS3_LIVE_TESTS=1
+export LAM_S3_LIVE_TESTS=1
 export S3_ACCESS_KEY_ID="..."
 export S3_SECRET_ACCESS_KEY="..."
 export S3_ENDPOINT="..."

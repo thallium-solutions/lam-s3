@@ -14,9 +14,8 @@ from pathlib import Path
 
 
 LIB_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = LIB_ROOT.parents[1]
 COMPILER = "lamc"
-MIN_COMPILER_VERSION = (0, 1, 0)
+MIN_COMPILER_VERSION = (1, 16, 0)
 PACKAGE_PATH = Path("@lam") / "s3"
 
 
@@ -72,15 +71,18 @@ def _expectations(source: str) -> list[str]:
 def _run_case(path: Path) -> tuple[bool, str]:
     source = path.read_text(encoding="utf-8")
     expected = _expectations(source)
-    with tempfile.TemporaryDirectory(prefix="lams3_test_") as tmp:
-        tmp_path = Path(tmp)
-        package = tmp_path / "extlibs" / PACKAGE_PATH
+    with tempfile.TemporaryDirectory(prefix="lam_s3_test_") as tmp:
+        consumer = Path(tmp)
+        extlibs = consumer / "extlibs"
+        package = extlibs / PACKAGE_PATH
         package.parent.mkdir(parents=True)
         package.symlink_to(LIB_ROOT, target_is_directory=True)
-        binary = tmp_path / "test_binary"
+        case = consumer / path.name
+        case.write_text(source, encoding="utf-8")
+        binary = consumer / "test_binary"
         compile_proc = subprocess.run(
-            [COMPILER, str(path), "--extlibs", str(tmp_path / "extlibs"), "-o", str(binary)],
-            cwd=str(PROJECT_ROOT),
+            [COMPILER, str(case), "--extlibs", str(extlibs), "-o", str(binary)],
+            cwd=str(consumer),
             capture_output=True,
             text=True,
             timeout=60,
@@ -89,7 +91,7 @@ def _run_case(path: Path) -> tuple[bool, str]:
             return False, "COMPILE FAIL:\n" + compile_proc.stderr
         run_proc = subprocess.run(
             [str(binary)],
-            cwd=str(PROJECT_ROOT),
+            cwd=str(consumer),
             capture_output=True,
             text=True,
             timeout=60,

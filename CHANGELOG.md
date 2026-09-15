@@ -2,12 +2,28 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## 2026-09-13
+
+### Changed
+
+- Raised compiler compatibility to Lam 1.16, documented path, Git, and registry
+  installation, and added repository metadata plus package test/format scripts.
+- Reused `lambytes` for buffer/string conversion while preserving the public S3
+  API and AWS SDK boundaries.
+
+### Fixed
+
+- Made the test runner stage cases as a scoped consumer dependency without
+  relying on the checkout's parent directories.
+- Replaced stale pre-scope package identifiers in current source, tests, and
+  notices.
+
 ## 2026-09-12
 
 ### Changed
 
-- Renamed the canonical library module from `lams3` to `@lam/s3` and updated the
-  manifest, imports, tests, and documentation for the scoped package name.
+- Renamed the canonical library module from its legacy unscoped name to
+  `@lam/s3` and updated the manifest, imports, tests, and documentation.
 - Updated the test runner to use `lamc` from `PATH`, require a compatible
   compiler before running, and stage the standalone checkout in the scoped
   extlibs layout expected by Lammergeier.
@@ -22,8 +38,8 @@ All notable changes to `@lam/s3` are documented here.
 
 ### Added
 
-- Added standalone Apache-2.0 `LICENSE` and lams3-specific `NOTICE` files for
-  distribution from the external `thallium-solutions/lams3` repository.
+- Added standalone Apache-2.0 `LICENSE` and package-specific `NOTICE` files for
+  distribution from the external `thallium-solutions/lam-s3` repository.
 - Added this package-specific changelog.
 
 ### Changed
@@ -42,8 +58,7 @@ All notable changes to `@lam/s3` are documented here.
   for applications that load credentials outside environment variables.
 - Added offline coverage for direct configuration, `Result`/`do-catch` config
   handling, presigned URLs, and object defaults.
-- Expanded live R2/S3 roundtrip coverage using the dedicated
-  `lams3-tests/live-roundtrip/` prefix.
+- Expanded live R2/S3 roundtrip coverage using a dedicated test-object prefix.
 
 ### Changed
 
@@ -73,6 +88,6 @@ All notable changes to `@lam/s3` are documented here.
 
 ### Added
 
-- Added the initial lams3 package under `third_party/` with S3-compatible
+- Added the initial S3 package under `third_party/` with S3-compatible
   configuration, object upload/download, listing, deletion, public URL helpers,
   and optional live integration testing.

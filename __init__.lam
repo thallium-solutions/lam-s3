@@ -1,6 +1,7 @@
 # Copyright 2026 Thallium Solutions di Busconi Alessandro.
 # SPDX-License-Identifier: Apache-2.0
 
+from lambytes import Bytes
 from lamenv import Env
 from lamerrors import Result, Error
 
@@ -22,7 +23,7 @@ go! {
         "github.com/aws/aws-sdk-go-v2/service/s3/types"
     )
 
-    func lamS3Err(kind string, format string, args ...interface{}) *LAMMERGEIER.Error {
+    func s3Error(kind string, format string, args ...interface{}) *LAMMERGEIER.Error {
         return LAMMERGEIER.Error(kind, fmt.Sprintf(format, args...), nil)
     }
 }
@@ -100,7 +101,7 @@ class S3Client {
                 config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AccessKeyId, cfg.SecretAccessKey, "")),
             )
             if err != nil {
-                panic("lams3: config: " + err.Error())
+                panic("@lam/s3: config: " + err.Error())
             }
             s.Raw = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
                 o.BaseEndpoint = aws.String("https://" + endpoint)
@@ -139,7 +140,7 @@ class S3Client {
                 ContentType: aws.String(contentType),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3PutError", "put %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3PutError", "put %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(true)
         }
@@ -158,27 +159,7 @@ class S3Client {
     }
 
     func tryPutBuffer(self, key: str, data: list[int], contentType: str = "application/octet-stream") -> Result {
-        ready: Result = self._ready()
-        if not ready.ok() {
-            return ready
-        }
-        go! {
-            buf := make([]byte, len(data))
-            for i, v := range data {
-                buf[i] = byte(v)
-            }
-            client := s.Raw.(*s3.Client)
-            _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
-                Bucket:      aws.String(s.Cfg.Bucket),
-                Key:         aws.String(key),
-                Body:        bytes.NewReader(buf),
-                ContentType: aws.String(contentType),
-            })
-            if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3PutError", "put buffer %q: %v", key, err))
-            }
-            return LAMMERGEIER.Result.Ok(true)
-        }
+        return self.tryPutBytes(key, Bytes.fromBytes(data), contentType)
     }
 
     func putStream(self, key: str, stream: any, contentType: str = "application/octet-stream") -> bool {
@@ -193,7 +174,7 @@ class S3Client {
         go! {
             reader, ok := stream.(io.Reader)
             if !ok {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3TypeError", "put stream %q: value does not implement io.Reader", key))
+                return LAMMERGEIER.Result.Err(s3Error("S3TypeError", "put stream %q: value does not implement io.Reader", key))
             }
             client := s.Raw.(*s3.Client)
             _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
@@ -203,7 +184,7 @@ class S3Client {
                 ContentType: aws.String(contentType),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3PutError", "put stream %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3PutError", "put stream %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(true)
         }
@@ -221,7 +202,7 @@ class S3Client {
         go! {
             f, err := os.Open(localPath)
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3FileError", "open %q: %v", localPath, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3FileError", "open %q: %v", localPath, err))
             }
             defer f.Close()
             client := s.Raw.(*s3.Client)
@@ -232,7 +213,7 @@ class S3Client {
                 ContentType: aws.String(contentType),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3PutError", "upload %q to %q: %v", localPath, key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3PutError", "upload %q to %q: %v", localPath, key, err))
             }
             return LAMMERGEIER.Result.Ok(true)
         }
@@ -263,12 +244,12 @@ class S3Client {
                 Key:    aws.String(key),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3GetError", "get %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "get %q: %v", key, err))
             }
             defer out.Body.Close()
             data, err := io.ReadAll(out.Body)
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3GetError", "read %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "read %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(string(data))
         }
@@ -296,30 +277,8 @@ class S3Client {
     }
 
     func tryGetBuffer(self, key: str) -> Result {
-        ready: Result = self._ready()
-        if not ready.ok() {
-            return ready
-        }
-        go! {
-            client := s.Raw.(*s3.Client)
-            out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
-                Bucket: aws.String(s.Cfg.Bucket),
-                Key:    aws.String(key),
-            })
-            if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3GetError", "get buffer %q: %v", key, err))
-            }
-            defer out.Body.Close()
-            data, err := io.ReadAll(out.Body)
-            if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3GetError", "read buffer %q: %v", key, err))
-            }
-            buf := make([]int, len(data))
-            for i, b := range data {
-                buf[i] = int(b)
-            }
-            return LAMMERGEIER.Result.Ok(buf)
-        }
+        data: str = self.tryGetBytes(key)?
+        return Result.Ok(Bytes.toBytes(data))
     }
 
     func downloadFile(self, key: str, localPath: str) -> bool {
@@ -338,15 +297,15 @@ class S3Client {
                 Key:    aws.String(key),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3GetError", "download %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "download %q: %v", key, err))
             }
             defer out.Body.Close()
             data, err := io.ReadAll(out.Body)
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3GetError", "read %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "read %q: %v", key, err))
             }
             if err := os.WriteFile(localPath, data, 0644); err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3FileError", "write %q: %v", localPath, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3FileError", "write %q: %v", localPath, err))
             }
             return LAMMERGEIER.Result.Ok(true)
         }
@@ -368,7 +327,7 @@ class S3Client {
                 Key:    aws.String(key),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3DeleteError", "delete %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(true)
         }
@@ -397,14 +356,14 @@ class S3Client {
                 Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3DeleteError", "delete %d objects: %v", len(keys), err))
+                return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %d objects: %v", len(keys), err))
             }
             if len(out.Errors) > 0 {
                 msg := "unknown delete error"
                 if out.Errors[0].Message != nil {
                     msg = *out.Errors[0].Message
                 }
-                return LAMMERGEIER.Result.Err(lamS3Err("S3DeleteError", "delete %d objects: %s", len(keys), msg))
+                return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %d objects: %s", len(keys), msg))
             }
             return LAMMERGEIER.Result.Ok(len(keys))
         }
@@ -463,7 +422,7 @@ class S3Client {
                 Prefix: aws.String(prefix),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3ListError", "list %q: %v", prefix, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3ListError", "list %q: %v", prefix, err))
             }
             result := make([]*S3Object, 0, len(out.Contents))
             for _, item := range out.Contents {
@@ -533,7 +492,7 @@ class S3Client {
                 Key:    aws.String(key),
             })
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3HeadError", "stat %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3HeadError", "stat %q: %v", key, err))
             }
             obj := NewS3Object()
             obj.Key = key
@@ -577,7 +536,7 @@ class S3Client {
             }
             _, err := client.CopyObject(context.Background(), input)
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3CopyError", "copy %q to %q: %v", sourceKey, destKey, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3CopyError", "copy %q to %q: %v", sourceKey, destKey, err))
             }
             return LAMMERGEIER.Result.Ok(true)
         }
@@ -615,7 +574,7 @@ class S3Client {
                 Key:    aws.String(key),
             }, s3.WithPresignExpires(time.Duration(expiresSeconds)*time.Second))
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3PresignError", "presign GET %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3PresignError", "presign GET %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(out.URL)
         }
@@ -651,7 +610,7 @@ class S3Client {
                 ContentType: aws.String(contentType),
             }, s3.WithPresignExpires(time.Duration(expiresSeconds)*time.Second))
             if err != nil {
-                return LAMMERGEIER.Result.Err(lamS3Err("S3PresignError", "presign PUT %q: %v", key, err))
+                return LAMMERGEIER.Result.Err(s3Error("S3PresignError", "presign PUT %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(out.URL)
         }

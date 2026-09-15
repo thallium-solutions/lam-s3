@@ -31,8 +31,8 @@ func hasKey(keys: list[str], wanted: str) -> bool {
 }
 
 func main() {
-    if Env.get("LAMS3_LIVE_TESTS") != "1" {
-        print("skip: set LAMS3_LIVE_TESTS=1 to run live S3 tests")
+    if Env.get("LAM_S3_LIVE_TESTS") != "1" {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
         return
     }
 
@@ -42,7 +42,7 @@ func main() {
     }
 
     client: S3Client = S3Client.fromEnv()
-    prefix: str = "lams3-tests/live-roundtrip/"
+    prefix: str = "lam-s3-tests/live-roundtrip/"
     key: str = prefix + "hello.txt"
     copyKey: str = prefix + "hello-copy.txt"
     movedKey: str = prefix + "hello-moved.txt"
@@ -75,8 +75,8 @@ func main() {
     keys: list[str] = client.listKeys(prefix)
     print(f"list_has_moved={hasKey(keys, movedKey)}")
 
-    tmpIn: str = Os.tempFile("lams3-upload-", ".txt")
-    tmpOut: str = Os.tempFile("lams3-download-", ".txt")
+    tmpIn: str = Os.tempFile("lam-s3-upload-", ".txt")
+    tmpOut: str = Os.tempFile("lam-s3-download-", ".txt")
     Os.writeFile(tmpIn, "file body")
     uploadOk: bool = client.tryUploadFile(tmpIn, uploadKey, "text/plain").ok()
     downloadOk: bool = client.tryDownloadFile(uploadKey, tmpOut).ok()
