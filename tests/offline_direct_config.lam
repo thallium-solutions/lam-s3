@@ -16,12 +16,12 @@ func main() {
     print(cfg.bucket)
     print(cfg.region)
 
-    client: S3Client = S3Client(cfg)
+    client: S3Client = S3Client.connect(cfg)?
     print(client.publicUrl("direct/file.txt"))
     print(cfg.usePathStyle)
 
     missing: S3Config = S3Config("key", "secret", "endpoint")
-    res: Result = missing.validate()
+    res: Result[bool] = missing.validate()
     err: Error = res.error
     print(err.message)
 }

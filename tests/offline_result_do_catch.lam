@@ -1,13 +1,20 @@
 # expect: S3ConfigError
 # expect: caught S3ConfigError
 # expect: ready true
+# expect: false
+# expect: S3ConfigError
+# expect: true
+# expect: true
+# expect: true
 # expect: result_do_catch_ok
 
+from @lam/s3 import S3Client
 from @lam/s3 import S3Config
-from lamerrors import Result
+from @lam/s3 import S3Object
+from lamerrors import Result, Error
 
-func requireReady(cfg: S3Config) -> Result {
-    ready: Result = cfg.validate()
+func requireReady(cfg: S3Config) -> Result[bool] {
+    ready: Result[bool] = cfg.validate()
     if not ready.ok() {
         return ready
     }
@@ -16,7 +23,7 @@ func requireReady(cfg: S3Config) -> Result {
 
 func main() {
     empty: S3Config = S3Config()
-    missing: Result = empty.validate()
+    missing: Result[bool] = empty.validate()
     err: Error = missing.error
     print(err.kind)
 
@@ -35,7 +42,22 @@ func main() {
     cfg.region = "auto"
     cfg.bucket = "bucket"
 
-    readyRes: Result = requireReady(cfg)
+    readyRes: Result[bool] = requireReady(cfg)
     print(f"ready {readyRes.ok()}")
+
+    failedFactory: Result[S3Client] = S3Client.connect(empty)
+    factoryError: Error = failedFactory.error
+    print(failedFactory.ok())
+    print(factoryError.kind)
+
+    disconnected: S3Client = S3Client()
+    textPut: Result[bool] = disconnected.put("text.txt", "text")
+    bufferPut: Result[bool] = disconnected.put("bytes.bin", [0, 1, 255])
+    body: Result[str] = disconnected.get("text.txt")
+    objects: Result[list[S3Object]] = disconnected.list()
+    keys: Result[list[str]] = disconnected.keys()
+    print(not textPut.ok() and not bufferPut.ok())
+    print(not body.ok() and not objects.ok())
+    print(not keys.ok())
     print("result_do_catch_ok")
 }

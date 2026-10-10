@@ -2,6 +2,46 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## 2.0.0 - 2026-09-14
+
+### Changed
+
+- Replaced every `tryX` plus silent fallback pair with one unsuffixed,
+  payload-typed `Result[T]` API. SDK, network, filesystem, and configuration
+  failures are no longer converted to `false`, empty strings, empty objects, or
+  empty collections.
+- Replaced direct client construction with `S3Client.connect(...)` overloads
+  and made both `connect` and `fromEnv` return `Result[S3Client]`; AWS config
+  loading now reports `S3ConfigError` instead of panicking internally.
+- Consolidated string, `list[int]`, and native `io.Reader` uploads under
+  overloaded `put` methods. Object downloads now use `get -> Result[str]`, and
+  key-only listing is exposed as `keys -> Result[list[str]]`.
+- Changed `exists` to return non-not-found HEAD failures as `S3HeadError` rather
+  than silently treating every SDK error as a missing key.
+- Replaced package constructors named `__init__` with `init`, restricted `any`
+  to AWS SDK/native interop boundaries, and removed avoidable `go!` fallback
+  wrappers while retaining native AWS SDK calls.
+- Raised the package major version to 2.0.0 and compiler compatibility to Lam
+  `^1.18`.
+
+### Removed
+
+- Removed all 1.x `tryX` methods, boolean/string/list fallback twins,
+  type-suffixed `putText`/`putBytes`/`putBuffer`/`putStream` methods,
+  `getText`/`getBytes`/`getBuffer`, `listKeys`, and fallback presigned URL
+  wrappers. No deprecated aliases remain.
+
+### Testing
+
+- Updated offline coverage for Result-returning factories, failed construction
+  without a panic, typed `Result[T]` payloads, overloaded `put` dispatch, inert
+  client errors, direct configuration, environment configuration, presigning,
+  and deterministic public URLs.
+- Added an installed-package offline pipeline composing context, JSON, bytes,
+  crypto, connect overloads, presigning, public URLs, and inert client failures.
+- Updated the optional live roundtrip source to the 2.x API; it remains strictly
+  opt-in and was not used for release verification.
+
 ## 2026-09-13
 
 ### Changed

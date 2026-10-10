@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from lambytes import Bytes
-from lamenv import Env
 from lamerrors import Result, Error
 
 go! {
     import (
         "bytes"
         "context"
+        "errors"
         "fmt"
         "io"
         "net/url"
@@ -21,6 +21,7 @@ go! {
         "github.com/aws/aws-sdk-go-v2/credentials"
         "github.com/aws/aws-sdk-go-v2/service/s3"
         "github.com/aws/aws-sdk-go-v2/service/s3/types"
+        "github.com/aws/smithy-go"
     )
 
     func s3Error(kind string, format string, args ...interface{}) *LAMMERGEIER.Error {
@@ -29,7 +30,7 @@ go! {
 }
 
 class S3Config {
-    func __init__(self, accessKeyId: str = "", secretAccessKey: str = "", endpoint: str = "", bucket: str = "", region: str = "auto", publicEndpoint: str = "", usePathStyle: bool = true) {
+    func init(self, accessKeyId: str = "", secretAccessKey: str = "", endpoint: str = "", bucket: str = "", region: str = "auto", publicEndpoint: str = "", usePathStyle: bool = true) {
         self.accessKeyId: str = accessKeyId
         self.secretAccessKey: str = secretAccessKey
         self.endpoint: str = endpoint
@@ -41,25 +42,28 @@ class S3Config {
 
     static func fromEnv() -> S3Config {
         cfg: S3Config = S3Config()
-        cfg.accessKeyId = Env.get("S3_ACCESS_KEY_ID")
-        cfg.secretAccessKey = Env.get("S3_SECRET_ACCESS_KEY")
-        cfg.endpoint = Env.get("S3_ENDPOINT")
-        cfg.publicEndpoint = Env.get("S3_PUBLIC_ENDPOINT")
-        cfg.region = Env.getOr("S3_REGION", "auto")
-        cfg.bucket = Env.get("S3_BUCKET")
-
-        rawUsePathStyle: str = Env.get("S3_USE_PATH_STYLE").trim().toLower()
-        if rawUsePathStyle != "" {
-            cfg.usePathStyle = rawUsePathStyle != "0" and rawUsePathStyle != "false" and rawUsePathStyle != "no"
+        go! {
+            cfg.AccessKeyId = os.Getenv("S3_ACCESS_KEY_ID")
+            cfg.SecretAccessKey = os.Getenv("S3_SECRET_ACCESS_KEY")
+            cfg.Endpoint = os.Getenv("S3_ENDPOINT")
+            cfg.PublicEndpoint = os.Getenv("S3_PUBLIC_ENDPOINT")
+            cfg.Bucket = os.Getenv("S3_BUCKET")
+            if value, ok := os.LookupEnv("S3_REGION"); ok {
+                cfg.Region = value
+            }
+            if value, ok := os.LookupEnv("S3_USE_PATH_STYLE"); ok {
+                value = strings.ToLower(strings.TrimSpace(value))
+                cfg.UsePathStyle = value != "0" && value != "false" && value != "no"
+            }
+            return cfg
         }
-        return cfg
     }
 
     func isReady(self) -> bool {
         return self.accessKeyId != "" and self.secretAccessKey != "" and self.endpoint != "" and self.region != "" and self.bucket != ""
     }
 
-    func validate(self) -> Result {
+    func validate(self) -> Result[bool] {
         if self.accessKeyId == "" {
             return Result.Err(Error("S3ConfigError", "S3_ACCESS_KEY_ID is required", None))
         }
@@ -80,7 +84,7 @@ class S3Config {
 }
 
 class S3Object {
-    func __init__(self) {
+    func init(self) {
         self.key: str = ""
         self.size: int = 0
         self.etag: str = ""
@@ -91,9 +95,17 @@ class S3Object {
 }
 
 class S3Client {
-    func __init__(self, cfg: S3Config) {
-        self.cfg: S3Config = cfg
+    func init(self) {
+        self.cfg: S3Config = S3Config()
         self.raw: any = None
+        self.connected: bool = false
+    }
+
+    static func connect(cfg: S3Config) -> Result[S3Client] {
+        ready: Result[bool] = cfg.validate()
+        if not ready.ok() {
+            return ready
+        }
         endpoint: str = S3.normalizeEndpoint(cfg.endpoint)
         go! {
             awsCfg, err := config.LoadDefaultConfig(context.Background(),
@@ -101,33 +113,41 @@ class S3Client {
                 config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AccessKeyId, cfg.SecretAccessKey, "")),
             )
             if err != nil {
-                panic("@lam/s3: config: " + err.Error())
+                return LAMMERGEIER.Result.Err(s3Error("S3ConfigError", "load AWS configuration: %v", err))
             }
-            s.Raw = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+            client := NewS3Client()
+            client.Cfg = cfg
+            client.Raw = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
                 o.BaseEndpoint = aws.String("https://" + endpoint)
                 o.UsePathStyle = cfg.UsePathStyle
             })
+            client.Connected = true
+            return LAMMERGEIER.Result.Ok(client)
         }
     }
 
-    static func fromEnv() -> S3Client {
-        return S3Client(S3Config.fromEnv())
+    static func connect(accessKeyId: str, secretAccessKey: str, endpoint: str, bucket: str, region: str = "auto", publicEndpoint: str = "", usePathStyle: bool = true) -> Result[S3Client] {
+        cfg: S3Config = S3Config(accessKeyId, secretAccessKey, endpoint, bucket, region, publicEndpoint, usePathStyle)
+        return S3Client.connect(cfg)
     }
 
-    static func connect(accessKeyId: str, secretAccessKey: str, endpoint: str, bucket: str, region: str = "auto", publicEndpoint: str = "", usePathStyle: bool = true) -> S3Client {
-        return S3Client(S3Config(accessKeyId, secretAccessKey, endpoint, bucket, region, publicEndpoint, usePathStyle))
+    static func fromEnv() -> Result[S3Client] {
+        return S3Client.connect(S3Config.fromEnv())
     }
 
-    func _ready(self) -> Result {
-        return self.cfg.validate()
+    func _ready(self) -> Result[bool] {
+        ready: Result[bool] = self.cfg.validate()
+        if not ready.ok() {
+            return ready
+        }
+        if not self.connected {
+            return Result.Err(Error("S3ConfigError", "S3 client is not connected; use S3Client.connect() or S3Client.fromEnv()", None))
+        }
+        return Result.Ok(true)
     }
 
-    func putText(self, key: str, text: str, contentType: str = "text/plain") -> bool {
-        return self.tryPutText(key, text, contentType).ok()
-    }
-
-    func tryPutText(self, key: str, text: str, contentType: str = "text/plain") -> Result {
-        ready: Result = self._ready()
+    func put(self, key: str, data: str, contentType: str = "text/plain") -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -136,7 +156,7 @@ class S3Client {
             _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
                 Bucket:      aws.String(s.Cfg.Bucket),
                 Key:         aws.String(key),
-                Body:        bytes.NewReader([]byte(text)),
+                Body:        bytes.NewReader([]byte(data)),
                 ContentType: aws.String(contentType),
             })
             if err != nil {
@@ -146,28 +166,12 @@ class S3Client {
         }
     }
 
-    func putBytes(self, key: str, data: str, contentType: str = "application/octet-stream") -> bool {
-        return self.tryPutBytes(key, data, contentType).ok()
+    func put(self, key: str, data: list[int], contentType: str = "application/octet-stream") -> Result[bool] {
+        return self.put(key, Bytes.fromBytes(data), contentType)
     }
 
-    func tryPutBytes(self, key: str, data: str, contentType: str = "application/octet-stream") -> Result {
-        return self.tryPutText(key, data, contentType)
-    }
-
-    func putBuffer(self, key: str, data: list[int], contentType: str = "application/octet-stream") -> bool {
-        return self.tryPutBuffer(key, data, contentType).ok()
-    }
-
-    func tryPutBuffer(self, key: str, data: list[int], contentType: str = "application/octet-stream") -> Result {
-        return self.tryPutBytes(key, Bytes.fromBytes(data), contentType)
-    }
-
-    func putStream(self, key: str, stream: any, contentType: str = "application/octet-stream") -> bool {
-        return self.tryPutStream(key, stream, contentType).ok()
-    }
-
-    func tryPutStream(self, key: str, stream: any, contentType: str = "application/octet-stream") -> Result {
-        ready: Result = self._ready()
+    func put(self, key: str, stream: any, contentType: str = "application/octet-stream") -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -190,12 +194,8 @@ class S3Client {
         }
     }
 
-    func uploadFile(self, localPath: str, key: str, contentType: str = "application/octet-stream") -> bool {
-        return self.tryUploadFile(localPath, key, contentType).ok()
-    }
-
-    func tryUploadFile(self, localPath: str, key: str, contentType: str = "application/octet-stream") -> Result {
-        ready: Result = self._ready()
+    func uploadFile(self, localPath: str, key: str, contentType: str = "application/octet-stream") -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -219,21 +219,8 @@ class S3Client {
         }
     }
 
-    func getText(self, key: str) -> str {
-        go! {
-            r := s.TryGetText(key)
-            if !r.Ok() {
-                return ""
-            }
-            if v, ok := r.Value.(string); ok {
-                return v
-            }
-            return ""
-        }
-    }
-
-    func tryGetText(self, key: str) -> Result {
-        ready: Result = self._ready()
+    func get(self, key: str) -> Result[str] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -255,38 +242,8 @@ class S3Client {
         }
     }
 
-    func getBytes(self, key: str) -> str {
-        return self.getText(key)
-    }
-
-    func tryGetBytes(self, key: str) -> Result {
-        return self.tryGetText(key)
-    }
-
-    func getBuffer(self, key: str) -> list[int] {
-        go! {
-            r := s.TryGetBuffer(key)
-            if !r.Ok() {
-                return []int{}
-            }
-            if v, ok := r.Value.([]int); ok {
-                return v
-            }
-            return []int{}
-        }
-    }
-
-    func tryGetBuffer(self, key: str) -> Result {
-        data: str = self.tryGetBytes(key)?
-        return Result.Ok(Bytes.toBytes(data))
-    }
-
-    func downloadFile(self, key: str, localPath: str) -> bool {
-        return self.tryDownloadFile(key, localPath).ok()
-    }
-
-    func tryDownloadFile(self, key: str, localPath: str) -> Result {
-        ready: Result = self._ready()
+    func downloadFile(self, key: str, localPath: str) -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -311,12 +268,8 @@ class S3Client {
         }
     }
 
-    func delete(self, key: str) -> bool {
-        return self.tryDelete(key).ok()
-    }
-
-    func tryDelete(self, key: str) -> Result {
-        ready: Result = self._ready()
+    func delete(self, key: str) -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -333,12 +286,8 @@ class S3Client {
         }
     }
 
-    func deleteMany(self, keys: list[str]) -> bool {
-        return self.tryDeleteMany(keys).ok()
-    }
-
-    func tryDeleteMany(self, keys: list[str]) -> Result {
-        ready: Result = self._ready()
+    func deleteMany(self, keys: list[str]) -> Result[int] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -369,21 +318,8 @@ class S3Client {
         }
     }
 
-    func exists(self, key: str) -> bool {
-        go! {
-            r := s.TryExists(key)
-            if !r.Ok() {
-                return false
-            }
-            if v, ok := r.Value.(bool); ok {
-                return v
-            }
-            return false
-        }
-    }
-
-    func tryExists(self, key: str) -> Result {
-        ready: Result = self._ready()
+    func exists(self, key: str) -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -393,25 +329,19 @@ class S3Client {
                 Bucket: aws.String(s.Cfg.Bucket),
                 Key:    aws.String(key),
             })
-            return LAMMERGEIER.Result.Ok(err == nil)
+            if err == nil {
+                return LAMMERGEIER.Result.Ok(true)
+            }
+            var apiErr smithy.APIError
+            if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
+                return LAMMERGEIER.Result.Ok(false)
+            }
+            return LAMMERGEIER.Result.Err(s3Error("S3HeadError", "exists %q: %v", key, err))
         }
     }
 
-    func list(self, prefix: str = "") -> list[S3Object] {
-        go! {
-            r := s.TryList(prefix)
-            if !r.Ok() {
-                return []*S3Object{}
-            }
-            if v, ok := r.Value.([]*S3Object); ok {
-                return v
-            }
-            return []*S3Object{}
-        }
-    }
-
-    func tryList(self, prefix: str = "") -> Result {
-        ready: Result = self._ready()
+    func list(self, prefix: str = "") -> Result[list[S3Object]] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -445,21 +375,8 @@ class S3Client {
         }
     }
 
-    func listKeys(self, prefix: str = "") -> list[str] {
-        go! {
-            r := s.TryListKeys(prefix)
-            if !r.Ok() {
-                return []string{}
-            }
-            if v, ok := r.Value.([]string); ok {
-                return v
-            }
-            return []string{}
-        }
-    }
-
-    func tryListKeys(self, prefix: str = "") -> Result {
-        items: list[S3Object] = self.tryList(prefix)?
+    func keys(self, prefix: str = "") -> Result[list[str]] {
+        items: list[S3Object] = self.list(prefix)?
         keys: list[str] = []
         for item in items {
             keys.append(item.key)
@@ -467,21 +384,8 @@ class S3Client {
         return Result.Ok(keys)
     }
 
-    func stat(self, key: str) -> S3Object {
-        go! {
-            r := s.TryStat(key)
-            if !r.Ok() {
-                return NewS3Object()
-            }
-            if v, ok := r.Value.(*S3Object); ok {
-                return v
-            }
-            return NewS3Object()
-        }
-    }
-
-    func tryStat(self, key: str) -> Result {
-        ready: Result = self._ready()
+    func stat(self, key: str) -> Result[S3Object] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -513,12 +417,8 @@ class S3Client {
         }
     }
 
-    func copy(self, sourceKey: str, destKey: str, contentType: str = "") -> bool {
-        return self.tryCopy(sourceKey, destKey, contentType).ok()
-    }
-
-    func tryCopy(self, sourceKey: str, destKey: str, contentType: str = "") -> Result {
-        ready: Result = self._ready()
+    func copy(self, sourceKey: str, destKey: str, contentType: str = "") -> Result[bool] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -542,24 +442,20 @@ class S3Client {
         }
     }
 
-    func move(self, sourceKey: str, destKey: str, contentType: str = "") -> bool {
-        return self.tryMove(sourceKey, destKey, contentType).ok()
-    }
-
-    func tryMove(self, sourceKey: str, destKey: str, contentType: str = "") -> Result {
-        copied: Result = self.tryCopy(sourceKey, destKey, contentType)
+    func move(self, sourceKey: str, destKey: str, contentType: str = "") -> Result[bool] {
+        copied: Result[bool] = self.copy(sourceKey, destKey, contentType)
         if not copied.ok() {
             return copied
         }
-        deleted: Result = self.tryDelete(sourceKey)
+        deleted: Result[bool] = self.delete(sourceKey)
         if not deleted.ok() {
             return deleted
         }
         return Result.Ok(true)
     }
 
-    func presignGet(self, key: str, expiresSeconds: int = 900) -> Result {
-        ready: Result = self._ready()
+    func presignGet(self, key: str, expiresSeconds: int = 900) -> Result[str] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -580,21 +476,8 @@ class S3Client {
         }
     }
 
-    func presignedGetUrl(self, key: str, expiresSeconds: int = 900) -> str {
-        go! {
-            r := s.PresignGet(key, expiresSeconds)
-            if !r.Ok() {
-                return ""
-            }
-            if v, ok := r.Value.(string); ok {
-                return v
-            }
-            return ""
-        }
-    }
-
-    func presignPut(self, key: str, contentType: str = "application/octet-stream", expiresSeconds: int = 900) -> Result {
-        ready: Result = self._ready()
+    func presignPut(self, key: str, contentType: str = "application/octet-stream", expiresSeconds: int = 900) -> Result[str] {
+        ready: Result[bool] = self._ready()
         if not ready.ok() {
             return ready
         }
@@ -613,19 +496,6 @@ class S3Client {
                 return LAMMERGEIER.Result.Err(s3Error("S3PresignError", "presign PUT %q: %v", key, err))
             }
             return LAMMERGEIER.Result.Ok(out.URL)
-        }
-    }
-
-    func presignedPutUrl(self, key: str, contentType: str = "application/octet-stream", expiresSeconds: int = 900) -> str {
-        go! {
-            r := s.PresignPut(key, contentType, expiresSeconds)
-            if !r.Ok() {
-                return ""
-            }
-            if v, ok := r.Value.(string); ok {
-                return v
-            }
-            return ""
         }
     }
 

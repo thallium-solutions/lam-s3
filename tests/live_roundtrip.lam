@@ -14,11 +14,14 @@
 from @lam/s3 import S3
 from @lam/s3 import S3Client
 from @lam/s3 import S3Object
-from lamenv import Env
+from lambytes import Bytes
 from lamos import Os
 
 go! {
-    import "strings"
+    import (
+        "os"
+        "strings"
+    )
 }
 
 func hasKey(keys: list[str], wanted: str) -> bool {
@@ -31,7 +34,8 @@ func hasKey(keys: list[str], wanted: str) -> bool {
 }
 
 func main() {
-    if Env.get("LAM_S3_LIVE_TESTS") != "1" {
+    liveEnabled: bool = go!(os.Getenv("LAM_S3_LIVE_TESTS") == "1")
+    if not liveEnabled {
         print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
         return
     }
@@ -41,7 +45,7 @@ func main() {
         return
     }
 
-    client: S3Client = S3Client.fromEnv()
+    client: S3Client = S3Client.fromEnv()?
     prefix: str = "lam-s3-tests/live-roundtrip/"
     key: str = prefix + "hello.txt"
     copyKey: str = prefix + "hello-copy.txt"
@@ -55,53 +59,53 @@ func main() {
 
     _ = client.deleteMany(preCleanKeys)
 
-    putOk: bool = client.tryPutText(key, body, "text/plain").ok()
+    putOk: bool = client.put(key, body, "text/plain").ok()
     print(f"put={putOk}")
 
-    got: str = client.getText(key)
+    got: str = client.get(key)?
     print(f"body={got == body}")
 
-    copyOk: bool = client.tryCopy(key, copyKey, "text/plain").ok()
+    copyOk: bool = client.copy(key, copyKey, "text/plain").ok()
     _ = copyOk
-    copied: str = client.getText(copyKey)
+    copied: str = client.get(copyKey)?
     print(f"copy_body={copied == body}")
 
-    movedOk: bool = client.tryMove(copyKey, movedKey, "text/plain").ok()
+    movedOk: bool = client.move(copyKey, movedKey, "text/plain").ok()
     _ = movedOk
-    movedExists: bool = client.exists(movedKey)
-    oldCopyExists: bool = client.exists(copyKey)
+    movedExists: bool = client.exists(movedKey)?
+    oldCopyExists: bool = client.exists(copyKey)?
     print(f"moved_exists={movedExists and not oldCopyExists}")
 
-    keys: list[str] = client.listKeys(prefix)
+    keys: list[str] = client.keys(prefix)?
     print(f"list_has_moved={hasKey(keys, movedKey)}")
 
-    tmpIn: str = Os.tempFile("lam-s3-upload-", ".txt")
-    tmpOut: str = Os.tempFile("lam-s3-download-", ".txt")
-    Os.writeFile(tmpIn, "file body")
-    uploadOk: bool = client.tryUploadFile(tmpIn, uploadKey, "text/plain").ok()
-    downloadOk: bool = client.tryDownloadFile(uploadKey, tmpOut).ok()
-    downloaded: str = Os.readFile(tmpOut)
+    tmpIn: str = Os.tempFile("lam-s3-upload-", ".txt")?
+    tmpOut: str = Os.tempFile("lam-s3-download-", ".txt")?
+    Os.writeFile(tmpIn, "file body")?
+    uploadOk: bool = client.uploadFile(tmpIn, uploadKey, "text/plain").ok()
+    downloadOk: bool = client.downloadFile(uploadKey, tmpOut).ok()
+    downloaded: str = Os.readFile(tmpOut)?
     print(f"upload_download={uploadOk and downloadOk and downloaded == 'file body'}")
-    Os.remove(tmpIn)
-    Os.remove(tmpOut)
+    Os.remove(tmpIn)?
+    Os.remove(tmpOut)?
 
     buffer: list[int] = [0, 1, 2, 255]
-    bufferOk: bool = client.tryPutBuffer(bufferKey, buffer, "application/octet-stream").ok()
-    roundBuffer: list[int] = client.getBuffer(bufferKey)
+    bufferOk: bool = client.put(bufferKey, buffer, "application/octet-stream").ok()
+    roundBuffer: list[int] = Bytes.toBytes(client.get(bufferKey)?)
     print(f"buffer={bufferOk and len(roundBuffer) == 4 and roundBuffer[3] == 255}")
 
     stream: any = go!(strings.NewReader("stream body"))
-    streamOk: bool = client.tryPutStream(streamKey, stream, "text/plain").ok()
-    streamBody: str = client.getText(streamKey)
+    streamOk: bool = client.put(streamKey, stream, "text/plain").ok()
+    streamBody: str = client.get(streamKey)?
     print(f"stream={streamOk and streamBody == 'stream body'}")
 
-    obj: S3Object = client.stat(key)
+    obj: S3Object = client.stat(key)?
     print(f"stat={obj.key == key and obj.size == len(body) and obj.contentType == 'text/plain'}")
 
-    signedUrl: str = client.presignedGetUrl(key, 60)
+    signedUrl: str = client.presignGet(key, 60)?
     print(f"presign={signedUrl.contains('X-Amz-Signature=')}")
 
-    deleted: bool = client.deleteMany(cleanupKeys)
-    print(f"cleanup={deleted}")
+    deleted: int = client.deleteMany(cleanupKeys)?
+    print(f"cleanup={deleted == len(cleanupKeys)}")
     print("live_roundtrip_ok")
 }

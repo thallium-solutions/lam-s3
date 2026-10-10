@@ -15,7 +15,7 @@ from pathlib import Path
 
 LIB_ROOT = Path(__file__).resolve().parents[1]
 COMPILER = "lamc"
-MIN_COMPILER_VERSION = (1, 16, 0)
+MIN_COMPILER_VERSION = (1, 18, 0)
 PACKAGE_PATH = Path("@lam") / "s3"
 
 

@@ -4,53 +4,18 @@
   <img src="assets/logo-full.png" alt="Lammergeier logo" width="420">
 </p>
 
-`@lam/s3` is a small [Lammergeier Programming Language](https://github.com/thallium-solutions/lammergeier-lang) package for S3-compatible object storage.
-It targets AWS S3-style APIs and S3-compatible providers such as Cloudflare R2,
-MinIO, Wasabi, Backblaze B2, and custom gateways.
+`@lam/s3` is a Lammergeier client for AWS S3 and compatible object stores such
+as Cloudflare R2, MinIO, Wasabi, Backblaze B2, and custom gateways.
 
-## What you get
+Version 2 is a deliberately breaking, Result-first API. Expected configuration,
+filesystem, SDK, and network failures are never converted to `false`, `""`, or
+empty collections. Every fallible operation has one unsuffixed `Result[T]`
+method; callers can inspect it, propagate it with `?`, handle it with `do/catch`,
+or explicitly opt into a panic with `unwrap()`.
 
-- **Simple text object I/O** with `putText`, `getText`, `exists`, `list`, and
-  `delete`.
-- **Result-returning APIs** (`tryPutText`, `tryGetText`, `tryUploadFile`,
-  `tryCopy`, `tryMove`, `tryDeleteMany`, and more) for `?` and `do/catch`.
-- **Real-world object workflows**: file upload/download, copy, move, bulk
-  delete, key-only listing, buffers, Go `io.Reader` streams, object metadata,
-  and presigned GET/PUT URLs.
-- **Environment-based setup** through `S3Config.fromEnv()` and
-  `S3Client.fromEnv()`.
-- **Direct setup** with `S3Config(...)` or `S3Client.connect(...)` when
-  credentials come from your own config loader instead of environment variables.
-- **S3-compatible endpoints** with configurable path-style addressing.
-- **Public URL helpers** that safely encode object keys while preserving path
-  separators.
-- **Offline tests** for deterministic helpers and optional live roundtrip tests
-  for real buckets.
+## Requirements and installation
 
-## Package layout
-
-```text
-lam-s3/
-├── __init__.lam              # Public package API
-├── lamlib.toml               # Library metadata and Go SDK pins
-├── README.md                 # This guide
-├── CHANGELOG.md              # Package-specific release notes
-├── LICENSE                   # Apache License 2.0 text
-├── NOTICE                    # @lam/s3 attribution notices
-├── .env.example              # Safe environment template
-├── assets/
-│   └── logo-full.png         # Lammergeier official logo for README rendering
-└── tests/
-    ├── offline_*.lam         # No credentials required
-    ├── live_roundtrip.lam    # Optional real S3/R2 integration test
-    └── run_lams3_tests.py    # Package-specific test runner
-```
-
-## Installation
-
-`@lam/s3` requires Lam 1.16 or newer. Install Lam from the main
-[Lammergeier language repository](https://github.com/thallium-solutions/lammergeier-lang),
-then choose one of these package sources from your application project:
+`@lam/s3` 2.x requires Lam 1.18 or newer.
 
 ```bash
 # Local path
@@ -63,70 +28,73 @@ lamc install https://github.com/thallium-solutions/lam-s3.git
 lamc install @lam/s3
 ```
 
-The installer uses the canonical `@lam/s3` name from `lamlib.toml`, so consumers
-can use the scoped imports shown below regardless of the source form or checkout
-directory name.
+The canonical package name is `@lam/s3`, regardless of the checkout directory
+or installation source.
 
 ## Configuration
-
-Copy `.env.example` into your shell or secret manager and fill in real values.
-Do not commit credentials.
 
 ```bash
 export S3_ACCESS_KEY_ID="..."
 export S3_SECRET_ACCESS_KEY="..."
 export S3_ENDPOINT="account-id.r2.cloudflarestorage.com"
-export S3_PUBLIC_ENDPOINT="bucket.example.com"
-export S3_REGION="auto"
+export S3_PUBLIC_ENDPOINT="bucket.example.com" # optional
+export S3_REGION="auto"                         # optional; default: auto
 export S3_BUCKET="bucket-name"
-export S3_USE_PATH_STYLE="true"
+export S3_USE_PATH_STYLE="true"                 # optional; default: true
 ```
 
-### Environment variables
+Do not commit credentials. `S3_ENDPOINT` may include an `http://` or `https://`
+prefix; the client normalizes it before configuring the AWS SDK.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `S3_ACCESS_KEY_ID` | Yes | S3/R2 access key. |
-| `S3_SECRET_ACCESS_KEY` | Yes | S3/R2 secret key. |
-| `S3_ENDPOINT` | Yes | API endpoint without a bucket prefix. |
-| `S3_PUBLIC_ENDPOINT` | No | Public CDN/custom-domain endpoint for generated URLs. |
-| `S3_REGION` | No | Region, defaults to `auto` when omitted. |
-| `S3_BUCKET` | Yes | Bucket used by client operations. |
-| `S3_USE_PATH_STYLE` | No | Defaults to `true`; set `false`, `0`, or `no` for virtual-host style. |
+| `S3_ACCESS_KEY_ID` | Yes | S3-compatible access key. |
+| `S3_SECRET_ACCESS_KEY` | Yes | S3-compatible secret key. |
+| `S3_ENDPOINT` | Yes | API endpoint. |
+| `S3_PUBLIC_ENDPOINT` | No | CDN/custom domain used by `publicUrl`. |
+| `S3_REGION` | No | Region; defaults to `auto`. |
+| `S3_BUCKET` | Yes | Bucket used by object operations. |
+| `S3_USE_PATH_STYLE` | No | Defaults to `true`; `false`, `0`, or `no` disables it. |
 
 ## Quick start
 
+Client construction can fail and therefore uses an explicit factory. It never
+panics internally while loading AWS configuration.
+
 ```lammergeier
-from @lam/s3 import S3
 from @lam/s3 import S3Client
+from lamerrors import Result
+
+func uploadNote() -> Result[bool] {
+    s3: S3Client = S3Client.fromEnv()?
+    s3.put("notes/hello.txt", "hello from Lam", "text/plain")?
+
+    body: str = s3.get("notes/hello.txt")?
+    print(body)
+    print(s3.publicUrl("notes/hello.txt"))
+
+    return s3.delete("notes/hello.txt")
+}
 
 func main() {
-    if not S3.hasEnv() {
-        print("missing S3 configuration")
-        return
+    do {
+        uploadNote()?
+    } catch err {
+        print(f"s3 failed: {err}")
     }
-
-    s3: S3Client = S3Client.fromEnv()
-    key: str = "notes/hello.txt"
-
-    print(s3.putText(key, "hello from Lam", "text/plain"))
-    print(s3.exists(key))
-    print(s3.getText(key))
-    print(s3.publicUrl(key))
-    print(s3.delete(key))
 }
 ```
 
-### Without environment variables
+### Direct configuration
 
-Use direct configuration when your app already has a config object, secret
-manager, or tenant-specific credentials:
+`connect` is overloaded. Pass either an `S3Config` or the individual fields:
 
 ```lammergeier
-from @lam/s3 import S3Client
+from @lam/s3 import S3Client, S3Config
+from lamerrors import Result
 
-func main() {
-    s3: S3Client = S3Client.connect(
+func configuredClient() -> Result[S3Client] {
+    cfg: S3Config = S3Config(
         "access-key",
         "secret-key",
         "account-id.r2.cloudflarestorage.com",
@@ -135,207 +103,180 @@ func main() {
         "cdn.example.com",
         true,
     )
+    return S3Client.connect(cfg)
+}
 
-    print(s3.publicUrl("avatars/ada.png"))
+func directClient() -> Result[S3Client] {
+    return S3Client.connect(
+        "access-key",
+        "secret-key",
+        "account-id.r2.cloudflarestorage.com",
+        "app-bucket",
+    )
 }
 ```
 
-If you prefer to pass a config object:
+Calling `S3Client()` only creates an inert value for compiler/native plumbing.
+Operations on it return `S3ConfigError`; applications should use `connect` or
+`fromEnv`.
 
-```lammergeier
-from @lam/s3 import S3Client, S3Config
+## Overloaded object data
 
-func main() {
-    cfg: S3Config = S3Config("key", "secret", "endpoint.example.com", "bucket")
-    s3: S3Client = S3Client(cfg)
-    print(s3.putText("hello.txt", "hello", "text/plain"))
-}
-```
-
-For error-aware flows, use the `try*` methods with `?` inside `do/catch`:
+`put` uses Lam overloads instead of type-suffixed method names:
 
 ```lammergeier
 from @lam/s3 import S3Client
+from lambytes import Bytes
+from lamerrors import Result
 
-func main() {
-    s3: S3Client = S3Client.fromEnv()
+func examples(s3: S3Client) -> Result[bool] {
+    # str overload; content type defaults to text/plain.
+    s3.put("notes/today.txt", "ready")?
 
-    do {
-        s3.tryPutText("reports/today.txt", "ready", "text/plain")?
-        body: str = s3.tryGetText("reports/today.txt")?
-        url: str = s3.presignedGetUrl("reports/today.txt", 900)
-        print(body)
-        print(url)
-    } catch err {
-        print(f"s3 failed: {err}")
-    }
+    # list[int] overload; content type defaults to application/octet-stream.
+    raw: list[int] = [0, 1, 2, 255]
+    s3.put("raw/blob.bin", raw)?
+
+    # Object bodies are returned losslessly as str. Convert only when a Lam
+    # byte buffer is required.
+    encoded: str = s3.get("raw/blob.bin")?
+    roundTrip: list[int] = Bytes.toBytes(encoded)
+    print(len(roundTrip))
+    return Result.Ok(true)
 }
 ```
 
-### Files, buffers, streams, and metadata
+A third `put(key, stream: any, contentType)` overload accepts a native Go value
+that implements `io.Reader`. This is an intentional SDK/native boundary; normal
+Lam data should use the typed `str` or `list[int]` overload.
+
+## Files, metadata, lists, and URLs
 
 ```lammergeier
 from @lam/s3 import S3Client, S3Object
-from lamos import Os
+from lamerrors import Result
 
-go! {
-    import "strings"
-}
+func workflow(s3: S3Client) -> Result[bool] {
+    s3.uploadFile("report.pdf", "reports/report.pdf", "application/pdf")?
+    s3.downloadFile("reports/report.pdf", "/tmp/report.pdf")?
 
-func main() {
-    s3: S3Client = S3Client.fromEnv()
-
-    # Strings and files.
-    s3.tryPutText("notes/today.txt", "ready", "text/plain").unwrap()
-    s3.tryUploadFile("report.pdf", "reports/report.pdf", "application/pdf").unwrap()
-    s3.tryDownloadFile("reports/report.pdf", "/tmp/report.pdf").unwrap()
-
-    # Lam buffers use list[int], matching lambytes.Bytes helpers.
-    bytes: list[int] = [0, 1, 2, 255]
-    s3.tryPutBuffer("raw/blob.bin", bytes).unwrap()
-    roundTrip: list[int] = s3.getBuffer("raw/blob.bin")
-    print(len(roundTrip))
-
-    # Streams are for Go interop values that implement io.Reader.
-    reader: any = go!(strings.NewReader("stream body"))
-    s3.tryPutStream("streams/body.txt", reader, "text/plain").unwrap()
-
-    # stat() uses HEAD and does not download the object body.
-    obj: S3Object = s3.stat("notes/today.txt")
+    obj: S3Object = s3.stat("reports/report.pdf")?
     print(f"{obj.size} bytes, {obj.contentType}")
+
+    objects: list[S3Object] = s3.list("reports/")?
+    keys: list[str] = s3.keys("reports/")?
+    print(len(objects) == len(keys))
+
+    getUrl: str = s3.presignGet("reports/report.pdf", 900)?
+    putUrl: str = s3.presignPut("incoming/report.pdf", "application/pdf", 900)?
+    print(getUrl)
+    print(putUrl)
+    return Result.Ok(true)
 }
 ```
-
-For more complete examples, read the test cases:
-
-- `tests/offline_direct_config.lam` shows direct construction.
-- `tests/offline_result_do_catch.lam` shows `Result` and `do/catch`.
-- `tests/offline_presign_urls.lam` shows presigned URL generation.
-- `tests/live_roundtrip.lam` exercises text, files, buffers, streams, stat,
-  copy, move, list, presign, and bulk cleanup against a real bucket.
 
 ## API reference
 
 ### `S3Config`
 
-| Member | Type | Description |
-|--------|------|-------------|
-| `accessKeyId` | `str` | Credential access key. |
-| `secretAccessKey` | `str` | Credential secret key. |
-| `endpoint` | `str` | S3-compatible API endpoint. |
-| `publicEndpoint` | `str` | Public URL endpoint used by `publicUrl`. |
-| `region` | `str` | Region, defaulting to `auto`. |
-| `bucket` | `str` | Bucket for object operations. |
-| `usePathStyle` | `bool` | Whether SDK requests use path-style addressing. |
+| API | Return | Description |
+|-----|--------|-------------|
+| `S3Config(accessKeyId="", secretAccessKey="", endpoint="", bucket="", region="auto", publicEndpoint="", usePathStyle=true)` | `S3Config` | Builds direct configuration. |
+| `S3Config.fromEnv()` | `S3Config` | Reads the `S3_*` environment variables. |
+| `cfg.isReady()` | `bool` | Checks that all required fields are populated. |
+| `cfg.validate()` | `Result[bool]` | Returns `S3ConfigError` for the first missing field. |
 
-| Method | Description |
-|--------|-------------|
-| `S3Config(accessKeyId="", secretAccessKey="", endpoint="", bucket="", region="auto", publicEndpoint="", usePathStyle=true)` | Builds config directly without environment variables. |
-| `S3Config.fromEnv()` | Builds config from `S3_*` environment variables. |
-| `cfg.isReady()` | Returns `true` when required credentials, endpoint, region, and bucket are present. |
-| `cfg.validate()` | Returns `Result.Ok(true)` or `Result.Err(Error("S3ConfigError", ...))`. |
+Class constructors in this package are defined with `init`. Lam continues to
+accept the legacy `__init__` spelling as an alias at the language level, but the
+package source and examples use `init`.
 
-### `S3Client`
+### `S3Client` factories
 
-| Method | Description |
-|--------|-------------|
-| `S3Client.fromEnv()` | Creates a client from environment configuration. |
-| `S3Client.connect(accessKeyId, secretAccessKey, endpoint, bucket, region="auto", publicEndpoint="", usePathStyle=true)` | Creates a client directly without env variables. |
-| `putText(key, text, contentType="text/plain")` | Uploads text and returns success as `bool`. |
-| `tryPutText(key, text, contentType="text/plain")` | Uploads text and returns `Result.Ok(true)` or `S3PutError`. |
-| `putBytes(key, data, contentType="application/octet-stream")` | Uploads binary-ish string data and returns success as `bool`. |
-| `tryPutBytes(key, data, contentType="application/octet-stream")` | Result-returning sibling of `putBytes`. |
-| `putBuffer(key, data, contentType="application/octet-stream")` | Uploads `list[int]` buffer data and returns success as `bool`. |
-| `tryPutBuffer(key, data, contentType="application/octet-stream")` | Result-returning buffer upload. |
-| `putStream(key, stream, contentType="application/octet-stream")` | Uploads a Go `io.Reader` value and returns success as `bool`. |
-| `tryPutStream(key, stream, contentType="application/octet-stream")` | Result-returning stream upload for Go interop. |
-| `getText(key)` | Reads an object as text, returning `""` on failure. |
-| `tryGetText(key)` | Reads an object as text and returns `Result.Ok(str)` or `S3GetError`. |
-| `getBytes(key)` | Alias for `getText` for byte-oriented object names. |
-| `tryGetBytes(key)` | Alias for `tryGetText`. |
-| `getBuffer(key)` | Reads an object into `list[int]`, returning `[]` on failure. |
-| `tryGetBuffer(key)` | Result-returning buffer download. |
-| `uploadFile(localPath, key, contentType="application/octet-stream")` | Uploads a local file and returns success as `bool`. |
-| `tryUploadFile(localPath, key, contentType="application/octet-stream")` | Result-returning file upload. |
-| `downloadFile(key, localPath)` | Downloads an object to a local file and returns success as `bool`. |
-| `tryDownloadFile(key, localPath)` | Result-returning file download. |
-| `exists(key)` | Checks whether an object exists. |
-| `tryExists(key)` | Returns `Result.Ok(bool)` for existence checks. |
-| `list(prefix="")` | Lists objects and returns `list[S3Object]`. |
-| `tryList(prefix="")` | Result-returning object listing. |
-| `listKeys(prefix="")` | Lists object keys only. |
-| `tryListKeys(prefix="")` | Result-returning key-only listing. |
-| `stat(key)` | Reads object metadata with HEAD, returning an empty `S3Object` on failure. |
-| `tryStat(key)` | Result-returning object metadata lookup. |
-| `delete(key)` | Deletes an object and returns success as `bool`. |
-| `tryDelete(key)` | Result-returning single-object delete. |
-| `deleteMany(keys)` | Deletes many objects and returns success as `bool`. |
-| `tryDeleteMany(keys)` | Deletes many objects and returns `Result.Ok(count)`. |
-| `copy(sourceKey, destKey, contentType="")` | Copies an object within the configured bucket. |
-| `tryCopy(sourceKey, destKey, contentType="")` | Result-returning copy. |
-| `move(sourceKey, destKey, contentType="")` | Copies then deletes the original object. |
-| `tryMove(sourceKey, destKey, contentType="")` | Result-returning move. |
-| `presignGet(key, expiresSeconds=900)` | Returns `Result.Ok(url)` for a temporary GET URL. |
-| `presignedGetUrl(key, expiresSeconds=900)` | String fallback wrapper around `presignGet`. |
-| `presignPut(key, contentType="application/octet-stream", expiresSeconds=900)` | Returns `Result.Ok(url)` for a temporary PUT URL. |
-| `presignedPutUrl(key, contentType="application/octet-stream", expiresSeconds=900)` | String fallback wrapper around `presignPut`. |
-| `publicUrl(key)` | Builds a public URL with the configured `publicEndpoint`. |
+| API | Return | Description |
+|-----|--------|-------------|
+| `S3Client.connect(cfg)` | `Result[S3Client]` | Validates a config and constructs the AWS SDK client. |
+| `S3Client.connect(accessKeyId, secretAccessKey, endpoint, bucket, region="auto", publicEndpoint="", usePathStyle=true)` | `Result[S3Client]` | Overloaded direct factory. |
+| `S3Client.fromEnv()` | `Result[S3Client]` | Loads environment config and constructs a client. |
 
-### `S3Object`
+### `S3Client` operations
 
-Objects returned by `list` expose:
+| API | Return | Description |
+|-----|--------|-------------|
+| `put(key, data: str, contentType="text/plain")` | `Result[bool]` | Uploads string data. |
+| `put(key, data: list[int], contentType="application/octet-stream")` | `Result[bool]` | Overloaded byte-buffer upload. |
+| `put(key, stream: any, contentType="application/octet-stream")` | `Result[bool]` | Overloaded native `io.Reader` upload. |
+| `get(key)` | `Result[str]` | Downloads an object body without hiding failures. |
+| `uploadFile(localPath, key, contentType="application/octet-stream")` | `Result[bool]` | Uploads a local file. |
+| `downloadFile(key, localPath)` | `Result[bool]` | Downloads to a local file. |
+| `exists(key)` | `Result[bool]` | Returns `Ok(false)` only for missing keys; other HEAD failures are errors. |
+| `list(prefix="")` | `Result[list[S3Object]]` | Lists object metadata. |
+| `keys(prefix="")` | `Result[list[str]]` | Projects a listing to keys. |
+| `stat(key)` | `Result[S3Object]` | Reads object metadata with HEAD. |
+| `delete(key)` | `Result[bool]` | Deletes one object. |
+| `deleteMany(keys)` | `Result[int]` | Deletes objects and returns their count. |
+| `copy(sourceKey, destKey, contentType="")` | `Result[bool]` | Copies within the configured bucket. |
+| `move(sourceKey, destKey, contentType="")` | `Result[bool]` | Copies, then deletes the source. |
+| `presignGet(key, expiresSeconds=900)` | `Result[str]` | Generates a temporary GET URL. |
+| `presignPut(key, contentType="application/octet-stream", expiresSeconds=900)` | `Result[str]` | Generates a temporary PUT URL. |
+| `publicUrl(key)` | `str` | Builds a deterministic public URL from `publicEndpoint`. |
 
-| Field | Description |
-|-------|-------------|
-| `key` | Object key. |
-| `size` | Object size in bytes. |
-| `etag` | Provider ETag value. |
-| `lastModified` | ISO-like timestamp string. |
-| `contentType` | Content type from `stat` / `tryStat`; empty for plain list results. |
-| `metadata` | User metadata from `stat` / `tryStat`; empty for plain list results. |
+`S3Object` fields are `key`, `size`, `etag`, `lastModified`, `contentType`, and
+`metadata`.
 
-### `S3`
+`S3.publicUrl(publicEndpoint, key)` builds a URL without a client, and
+`S3.hasEnv()` checks whether required environment configuration is present.
+Public URL helpers always emit HTTPS and path-escape keys while preserving `/`.
 
-| Method | Description |
-|--------|-------------|
-| `S3.publicUrl(publicEndpoint, key)` | Builds a public URL without constructing a client. |
-| `S3.hasEnv()` | Returns whether required environment configuration is present. |
+## 1.x to 2.x API map
+
+| Removed 1.x API | 2.x replacement |
+|-----------------|-----------------|
+| `S3Client(cfg)` | `S3Client.connect(cfg) -> Result[S3Client]` |
+| `S3Client.connect(...) -> S3Client` | `S3Client.connect(...) -> Result[S3Client]` |
+| `S3Client.fromEnv() -> S3Client` | `S3Client.fromEnv() -> Result[S3Client]` |
+| `putText` / `tryPutText` | `put(str) -> Result[bool]` |
+| `putBytes` / `tryPutBytes` | `put(str, contentType) -> Result[bool]` |
+| `putBuffer` / `tryPutBuffer` | `put(list[int]) -> Result[bool]` |
+| `putStream` / `tryPutStream` | `put(any) -> Result[bool]` at the native boundary |
+| `getText` / `tryGetText` / `getBytes` / `tryGetBytes` | `get -> Result[str]` |
+| `getBuffer` / `tryGetBuffer` | `Bytes.toBytes(client.get(key)?)` |
+| `uploadFile` / `tryUploadFile` | `uploadFile -> Result[bool]` |
+| `downloadFile` / `tryDownloadFile` | `downloadFile -> Result[bool]` |
+| `delete` / `tryDelete` | `delete -> Result[bool]` |
+| `deleteMany` / `tryDeleteMany` | `deleteMany -> Result[int]` |
+| `exists` / `tryExists` | `exists -> Result[bool]` |
+| `list` / `tryList` | `list -> Result[list[S3Object]]` |
+| `listKeys` / `tryListKeys` | `keys -> Result[list[str]]` |
+| `stat` / `tryStat` | `stat -> Result[S3Object]` |
+| `copy` / `tryCopy` | `copy -> Result[bool]` |
+| `move` / `tryMove` | `move -> Result[bool]` |
+| `presignedGetUrl` | `presignGet -> Result[str]` |
+| `presignedPutUrl` | `presignPut -> Result[str]` |
+
+There are no compatibility aliases for these removed methods; 2.0 is a major
+release specifically so failures cannot accidentally remain silent.
 
 ## Testing
 
-Offline tests compile and run without credentials:
+Offline tests compile and run without credentials and are the default:
 
 ```bash
 python3 tests/run_lams3_tests.py --verbose
 ```
 
-Live tests use the dedicated `lam-s3-tests/live-roundtrip/` prefix and perform
-upload, read, copy, move, list, file upload/download, presigned URL generation,
-and bulk delete operations against the configured bucket:
+The live roundtrip is opt-in, uses the isolated `lam-s3-tests/live-roundtrip/`
+prefix, and must never be run as part of offline verification:
 
 ```bash
 export LAM_S3_LIVE_TESTS=1
-export S3_ACCESS_KEY_ID="..."
-export S3_SECRET_ACCESS_KEY="..."
-export S3_ENDPOINT="..."
-export S3_PUBLIC_ENDPOINT="..."
-export S3_REGION="auto"
-export S3_BUCKET="..."
+# set S3_* credentials explicitly
 python3 tests/run_lams3_tests.py --live --verbose
 ```
 
-## Notes
+The package pins AWS SDK for Go v2 modules, including
+`github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0`.
 
-- `publicUrl` trims `http://` or `https://` from the configured public endpoint
-  and always returns an `https://` URL.
-- Object keys are path-escaped while `/` remains a path separator.
-- The historical convenience methods return empty strings or `false` on failed
-  network operations. Prefer `try*` methods when callers need the error.
-- The package currently pins AWS SDK for Go v2 modules including
-  `github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0`.
+## License
 
-## License and changelog
-
-@lam/s3 is Copyright 2026 Thallium Solutions di Busconi Alessandro and is
-distributed under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`
-in this directory. Package-specific release notes live in `CHANGELOG.md`.
+Copyright 2026 Thallium Solutions di Busconi Alessandro. Distributed under the
+Apache License, Version 2.0. See `LICENSE`, `NOTICE`, and `CHANGELOG.md`.
