@@ -1,0 +1,17 @@
+# Regression: ``put(key, list[int])`` delegated to the stream overload and
+# always failed with "value does not implement io.Reader". The delegation is
+# checked offline by asserting the error is a transport error from the
+# unreachable endpoint, not an S3TypeError.
+#
+# expect: list-put-reaches-network=true
+
+from lamerrors import Result, Error
+from @lam/s3 import S3Client, S3Config
+
+func main() {
+    client: S3Client = S3Client.connect(S3Config("key", "secret", "http://127.0.0.1:1", "bucket", "us-east-1")).unwrap()
+    data: list[int] = [0, 1, 2, 255]
+    res: Result[bool] = client.put("bin/data.bin", data)
+    err: Error = res.error
+    print(f"list-put-reaches-network={err.kind == 'S3PutError' and not err.message.contains('io.Reader')}")
+}

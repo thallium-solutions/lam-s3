@@ -1,0 +1,117 @@
+# Live: multipart upload, part listing, abort, ranged reads and streaming
+# reads against a real S3-compatible endpoint (``http://`` endpoints such as
+# a local SeaweedFS/MinIO work). Guarded by LAM_S3_LIVE_TESTS=1.
+#
+# expect: bucket=true
+# expect: listed-parts=2
+# expect: completed=true
+# expect: size=5242893
+# expect: range=part-two-tail
+# expect: range-bytes=5
+# expect: tail-range=tail
+# expect: streamed=5242893
+# expect: stream-matches=true
+# expect: aborted=true
+# expect: abort-listing-fails=true
+# expect: live_multipart_ok
+
+from lamerrors import Result
+from lamos import Os
+from @lam/s3 import S3, S3Client, S3ObjectReader, S3Object, S3Part
+
+go! {
+    import (
+        "bytes"
+        "crypto/sha256"
+        "encoding/hex"
+    )
+}
+
+const PartSize: int = 5242880
+
+func chunks(total: int) -> list[bytes] {
+    #- First part is exactly 5 MiB of a repeating pattern; second is a short tail. -#
+    out: list[bytes] = []
+    go! {
+        first := bytes.Repeat([]byte("0123456789abcdef"), PartSize/16)
+        out = append(out, first, []byte("part-two-tail"))
+    }
+    _ = total
+    return out
+}
+
+func digest(parts: list[bytes]) -> str {
+    out: str = ""
+    go! {
+        h := sha256.New()
+        for _, p := range parts {
+            h.Write(p)
+        }
+        out = hex.EncodeToString(h.Sum(nil))
+    }
+    return out
+}
+
+func uploadAll(client: S3Client, key: str, parts: list[bytes]) -> Result[list[S3Part]] {
+    uploadId: str = client.createMultipartUpload(key, "application/octet-stream")?
+    done: list[S3Part] = []
+    for index, data in enumerate(parts) {
+        part: S3Part = client.uploadPart(key, uploadId, index + 1, data)?
+        done.append(part)
+    }
+    listed: list[S3Part] = client.listParts(key, uploadId)?
+    print(f"listed-parts={len(listed)}")
+    _ = client.completeMultipartUpload(key, uploadId, done)?
+    return Result.Ok(done)
+}
+
+func streamDigest(client: S3Client, key: str) -> Result[list[str]] {
+    reader: S3ObjectReader = client.open(key)?
+    total: int = 0
+    pieces: list[bytes] = []
+    while true {
+        chunk: bytes = reader.readBytes(1048576)?
+        if len(chunk) == 0 {
+            break
+        }
+        total += len(chunk)
+        pieces.append(chunk)
+    }
+    _ = reader.close()?
+    out: list[str] = [str(total), digest(pieces)]
+    return Result.Ok(out)
+}
+
+func main() {
+    if Os.getenv("LAM_S3_LIVE_TESTS").unwrapOr("") != "1" {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
+        return
+    }
+    client: S3Client = S3Client.fromEnv()?
+    print(f"bucket={client.ensureBucket()?}")
+    key: str = "lam-s3-tests/live-multipart/object.bin"
+    parts: list[bytes] = chunks(2)
+    expected: str = digest(parts)
+
+    uploaded: Result[list[S3Part]] = uploadAll(client, key, parts)
+    print(f"completed={uploaded.ok()}")
+    info: S3Object = client.stat(key)?
+    print(f"size={info.size}")
+    print("range=" + client.getRange(key, PartSize, 13)?)
+    tail: bytes = client.getRangeBytes(key, PartSize + 8, 5)?
+    print(f"range-bytes={len(tail)}")
+    print("tail-range=" + client.getRange(key, PartSize + 9, 100)?)
+
+    streamed: list[str] = streamDigest(client, key)?
+    print("streamed=" + streamed[0])
+    print(f"stream-matches={streamed[1] == expected}")
+
+    abortKey: str = "lam-s3-tests/live-multipart/aborted.bin"
+    abortId: str = client.createMultipartUpload(abortKey)?
+    _ = client.uploadPart(abortKey, abortId, 1, "never completed")?
+    print(f"aborted={client.abortMultipartUpload(abortKey, abortId)?}")
+    print(f"abort-listing-fails={not client.listParts(abortKey, abortId).ok()}")
+
+    _ = client.delete(key)?
+    print("live_multipart_ok")
+}

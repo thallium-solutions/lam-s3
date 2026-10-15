@@ -109,7 +109,7 @@ def _run_case(path: Path) -> tuple[bool, str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="@lam/s3 package tests")
-    ap.add_argument("--live", action="store_true", help="include live S3/R2 tests")
+    ap.add_argument("--live", action="store_true", help="include live S3-compatible tests (tests/live_*.lam)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -118,7 +118,7 @@ def main() -> None:
 
     cases = sorted((LIB_ROOT / "tests").glob("offline_*.lam"))
     if args.live:
-        cases.append(LIB_ROOT / "tests" / "live_roundtrip.lam")
+        cases.extend(sorted((LIB_ROOT / "tests").glob("live_*.lam")))
 
     passed = 0
     failures: list[tuple[Path, str]] = []

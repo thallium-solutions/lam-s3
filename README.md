@@ -44,7 +44,10 @@ export S3_USE_PATH_STYLE="true"                 # optional; default: true
 ```
 
 Do not commit credentials. `S3_ENDPOINT` may include an `http://` or `https://`
-prefix; the client normalizes it before configuring the AWS SDK.
+prefix. An explicit scheme is kept — local gateways such as MinIO or SeaweedFS
+(`S3_ENDPOINT=http://localhost:9000`) are reached over plain HTTP — and a bare
+host defaults to HTTPS. `S3.endpointUrl(endpoint)` returns the exact URL handed
+to the SDK.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -146,9 +149,69 @@ func examples(s3: S3Client) -> Result[bool] {
 }
 ```
 
-A third `put(key, stream: any, contentType)` overload accepts a native Go value
-that implements `io.Reader`. This is an intentional SDK/native boundary; normal
-Lam data should use the typed `str` or `list[int]` overload.
+A `put(key, data: bytes, contentType)` overload uploads a native byte slice
+without conversion, and `put(key, stream: any, contentType)` accepts a native Go
+value that implements `io.Reader`. Because every overload accepts an `any`
+argument, use the explicit `putStream(key, stream, contentType)` spelling for
+`any`-typed values. Normal Lam data should use the typed `str`, `bytes` or
+`list[int]` overload.
+
+## Large objects: multipart uploads, ranged and streaming reads
+
+Objects above a few hundred MiB should be uploaded in parts: each part except
+the last must be at least 5 MiB on AWS S3, at most 10,000 parts are allowed
+(`S3.maxParts()`), and an unfinished upload can be resumed by listing its parts
+or discarded with `abortMultipartUpload`. Reads can fetch a byte range or
+stream the body in chunks without buffering the whole object.
+
+```lammergeier
+from @lam/s3 import S3Client, S3ObjectReader, S3Part
+from lamerrors import Result
+
+func uploadInParts(s3: S3Client, key: str, chunks: list[bytes]) -> Result[int] {
+    uploadId: str = s3.createMultipartUpload(key, "video/mp4")?
+    parts: list[S3Part] = []
+    do {
+        for index, chunk in enumerate(chunks) {
+            part: S3Part = s3.uploadPart(key, uploadId, index + 1, chunk)?
+            parts.append(part)
+        }
+        _ = s3.completeMultipartUpload(key, uploadId, parts)?
+    } catch err {
+        _ = s3.abortMultipartUpload(key, uploadId)
+        return Result.Err(err)
+    }
+    return Result.Ok(len(parts))
+}
+
+func preview(s3: S3Client, key: str) -> Result[str] {
+    return s3.getRange(key, 0, 1024)          # first KiB
+}
+
+func countBytes(s3: S3Client, key: str) -> Result[int] {
+    reader: S3ObjectReader = s3.open(key)?     # or open(key, offset, length)
+    total: int = 0
+    while true {
+        chunk: bytes = reader.readBytes(1048576)?
+        if len(chunk) == 0 {
+            break
+        }
+        total += len(chunk)
+    }
+    _ = reader.close()?
+    return Result.Ok(total)
+}
+```
+
+`S3ObjectReader.raw` is the native `io.ReadCloser`, for Go interop such as
+copying a range straight into an HTTP response.
+
+## Buckets
+
+`bucketExists()` returns `Ok(false)` only when the configured bucket is
+missing; `createBucket()` returns `Ok(false)` when it already exists and is
+owned by the same credentials; `ensureBucket()` creates it on demand, which is
+convenient for development and test environments.
 
 ## Files, metadata, lists, and URLs
 
@@ -204,7 +267,18 @@ package source and examples use `init`.
 |-----|--------|-------------|
 | `put(key, data: str, contentType="text/plain")` | `Result[bool]` | Uploads string data. |
 | `put(key, data: list[int], contentType="application/octet-stream")` | `Result[bool]` | Overloaded byte-buffer upload. |
+| `put(key, data: bytes, contentType="application/octet-stream")` | `Result[bool]` | Overloaded native byte-slice upload. |
 | `put(key, stream: any, contentType="application/octet-stream")` | `Result[bool]` | Overloaded native `io.Reader` upload. |
+| `putStream(key, stream: any, contentType="application/octet-stream")` | `Result[bool]` | Unambiguous native `io.Reader` upload for `any` values. |
+| `getRange(key, offset, length)` | `Result[str]` | Reads a byte range as a binary-safe string. |
+| `getRangeBytes(key, offset, length)` | `Result[bytes]` | Reads a byte range as `bytes`. |
+| `open(key, offset=0, length=-1)` | `Result[S3ObjectReader]` | Streams the object (or a range) in chunks. |
+| `createMultipartUpload(key, contentType="application/octet-stream")` | `Result[str]` | Starts a multipart upload and returns its upload id. |
+| `uploadPart(key, uploadId, partNumber, data: bytes \| str \| list[int])` | `Result[S3Part]` | Uploads one part (1..10000). |
+| `listParts(key, uploadId)` | `Result[list[S3Part]]` | Lists uploaded parts, following pagination. |
+| `completeMultipartUpload(key, uploadId, parts)` | `Result[bool]` | Assembles ascending parts into the object. |
+| `abortMultipartUpload(key, uploadId)` | `Result[bool]` | Discards an unfinished upload. |
+| `bucketExists()` / `createBucket()` / `ensureBucket()` | `Result[bool]` | Bucket checks and creation. |
 | `get(key)` | `Result[str]` | Downloads an object body without hiding failures. |
 | `uploadFile(localPath, key, contentType="application/octet-stream")` | `Result[bool]` | Uploads a local file. |
 | `downloadFile(key, localPath)` | `Result[bool]` | Downloads to a local file. |
@@ -221,7 +295,13 @@ package source and examples use `init`.
 | `publicUrl(key)` | `str` | Builds a deterministic public URL from `publicEndpoint`. |
 
 `S3Object` fields are `key`, `size`, `etag`, `lastModified`, `contentType`, and
-`metadata`.
+`metadata`. `S3Part` has `partNumber`, `etag` and `size`. `S3ObjectReader` has
+`key`, `offset`, `size` (bytes in the opened range), `objectSize`, `contentType`,
+`etag`, `raw`, and the methods `readBytes(maxBytes=65536) -> Result[bytes]`,
+`read(maxBytes=65536) -> Result[str]` and `close() -> Result[bool]`.
+Argument errors (empty keys or upload ids, part numbers outside 1..10000,
+non-ascending parts, negative offsets) are returned as `S3ArgumentError`
+before any network call.
 
 `S3.publicUrl(publicEndpoint, key)` builds a URL without a client, and
 `S3.hasEnv()` checks whether required environment configuration is present.
@@ -264,14 +344,21 @@ Offline tests compile and run without credentials and are the default:
 python3 tests/run_lams3_tests.py --verbose
 ```
 
-The live roundtrip is opt-in, uses the isolated `lam-s3-tests/live-roundtrip/`
-prefix, and must never be run as part of offline verification:
+Live tests (`tests/live_*.lam`: roundtrip, multipart, ranged and streaming
+reads) are opt-in, use isolated `lam-s3-tests/` prefixes, and must never be run
+as part of offline verification. They work against any S3-compatible endpoint,
+including a disposable local one:
 
 ```bash
-export LAM_S3_LIVE_TESTS=1
-# set S3_* credentials explicitly
+docker run --rm -d --name lam-s3-live -p 8333:8333 \
+  -v "$PWD/s3.json:/etc/seaweedfs/s3.json:ro" chrislusf/seaweedfs:4.48 \
+  server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+export LAM_S3_LIVE_TESTS=1 S3_ENDPOINT=http://127.0.0.1:8333 S3_BUCKET=lam-s3-live
+# set S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY to the identity in s3.json
 python3 tests/run_lams3_tests.py --live --verbose
 ```
+
+`live_multipart_range.lam` creates the bucket with `ensureBucket()` when needed.
 
 The package pins AWS SDK for Go v2 modules, including
 `github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0`.

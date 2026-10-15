@@ -1,0 +1,33 @@
+# Regression: an explicit ``http://`` API endpoint (MinIO, SeaweedFS, local
+# gateways) used to be rewritten to ``https://``. The scheme is now kept;
+# endpoints without a scheme still default to HTTPS.
+#
+# expect: http://localhost:9000
+# expect: https://localhost:9000
+# expect: https://account.r2.cloudflarestorage.com
+# expect: http://127.0.0.1:8333
+# expect: presign-http=true
+# expect: presign-https=true
+# expect: public-url-still-https=https://cdn.example.com/a.txt
+
+from lamerrors import Result
+from @lam/s3 import S3, S3Client, S3Config
+
+func presignPrefix(endpoint: str, wanted: str) -> Result[bool] {
+    client: S3Client = S3Client.connect(S3Config("key", "secret", endpoint, "bucket", "us-east-1", "http://cdn.example.com"))?
+    url: str = client.presignGet("a.txt", 60)?
+    return Result.Ok(url.startsWith(wanted))
+}
+
+func main() {
+    print(S3.endpointUrl("http://localhost:9000/"))
+    print(S3.endpointUrl("https://localhost:9000"))
+    print(S3.endpointUrl(" account.r2.cloudflarestorage.com "))
+    print(S3.endpointUrl("HTTP://127.0.0.1:8333"))
+    plain: bool = presignPrefix("http://localhost:9000", "http://localhost:9000/bucket/a.txt?").unwrap()
+    secure: bool = presignPrefix("localhost:9443", "https://localhost:9443/bucket/a.txt?").unwrap()
+    print(f"presign-http={plain}")
+    print(f"presign-https={secure}")
+    client: S3Client = S3Client.connect(S3Config("key", "secret", "http://localhost:9000", "bucket", "us-east-1", "http://cdn.example.com")).unwrap()
+    print("public-url-still-https=" + client.publicUrl("a.txt"))
+}

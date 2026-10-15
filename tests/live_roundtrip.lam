@@ -15,6 +15,7 @@ from @lam/s3 import S3
 from @lam/s3 import S3Client
 from @lam/s3 import S3Object
 from lambytes import Bytes
+from lamerrors import Result
 from lamos import Os
 
 go! {
@@ -95,7 +96,7 @@ func main() {
     print(f"buffer={bufferOk and len(roundBuffer) == 4 and roundBuffer[3] == 255}")
 
     stream: any = go!(strings.NewReader("stream body"))
-    streamOk: bool = client.put(streamKey, stream, "text/plain").ok()
+    streamOk: bool = client.putStream(streamKey, stream, "text/plain").ok()
     streamBody: str = client.get(streamKey)?
     print(f"stream={streamOk and streamBody == 'stream body'}")
 

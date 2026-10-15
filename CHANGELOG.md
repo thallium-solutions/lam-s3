@@ -2,6 +2,41 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## 2.1.0 - 2026-10-15
+
+### Added
+
+- Multipart uploads: `createMultipartUpload`, `uploadPart` (`bytes`, `str` and
+  `list[int]` overloads), `listParts` (paginated), `completeMultipartUpload`
+  and `abortMultipartUpload`, with `S3Part` values and `S3.maxParts()`.
+- Ranged and streaming reads: `getRange`, `getRangeBytes` and
+  `open(key, offset, length) -> Result[S3ObjectReader]` with chunked
+  `readBytes`/`read`, `close`, and the native `raw` reader for Go interop.
+- Bucket helpers `bucketExists`, `createBucket` and `ensureBucket`.
+- `put(key, data: bytes)` overload and the explicit `putStream` spelling for
+  `any`-typed `io.Reader` values.
+- `S3.endpointUrl(endpoint)` and argument validation returning
+  `S3ArgumentError` before any network call.
+- Live multipart/range test runnable against local S3-compatible endpoints;
+  `--live` now runs every `tests/live_*.lam`.
+
+### Fixed
+
+- An explicit `http://` API endpoint is no longer rewritten to `https://`, so
+  plain-HTTP gateways such as MinIO and SeaweedFS work. Bare hosts still
+  default to HTTPS, and public URLs are still always HTTPS.
+- `put(key, list[int])` delegated to the stream overload and always failed with
+  "value does not implement io.Reader"; it now uploads the bytes.
+- `tests/live_roundtrip.lam` compiles again under Lam 1.18.
+
+### Performance
+
+- `get` and `getRangeBytes` read the response body into one exactly sized
+  buffer instead of `io.ReadAll`, which re-grew and re-copied multi-MiB bodies
+  many times (about 70% of the CPU of a ranged-read workload).
+- `downloadFile` streams to disk instead of buffering the whole object in
+  memory.
+
 ## 2.0.0 - 2026-09-14
 
 ### Changed

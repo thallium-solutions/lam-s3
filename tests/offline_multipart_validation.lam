@@ -1,0 +1,42 @@
+# Multipart, ranged-read and streaming APIs validate their arguments before
+# any network call, returning typed S3ArgumentError results.
+#
+# expect: empty-key: S3ArgumentError
+# expect: part-zero: S3ArgumentError
+# expect: part-too-high: S3ArgumentError
+# expect: no-upload-id: S3ArgumentError
+# expect: no-parts: S3ArgumentError
+# expect: unordered-parts: S3ArgumentError
+# expect: negative-offset: S3ArgumentError
+# expect: zero-length: S3ArgumentError
+# expect: open-negative: S3ArgumentError
+# expect: part=3:"abc":7
+# expect: max-parts=10000
+
+from lamerrors import Result, Error
+from @lam/s3 import S3, S3Client, S3Config, S3Part
+
+func kind(r: Result) -> str {
+    if r.ok() {
+        return "ok"
+    }
+    err: Error = r.error
+    return err.kind
+}
+
+func main() {
+    client: S3Client = S3Client.connect(S3Config("key", "secret", "http://127.0.0.1:1", "bucket", "us-east-1"))?
+    print("empty-key: " + kind(client.createMultipartUpload("")))
+    print("part-zero: " + kind(client.uploadPart("k", "upload", 0, "data")))
+    print("part-too-high: " + kind(client.uploadPart("k", "upload", 10001, "data")))
+    print("no-upload-id: " + kind(client.uploadPart("k", "", 1, "data")))
+    print("no-parts: " + kind(client.completeMultipartUpload("k", "upload", [])))
+    unordered: list[S3Part] = [S3Part(2, "\"b\"", 5), S3Part(1, "\"a\"", 5)]
+    print("unordered-parts: " + kind(client.completeMultipartUpload("k", "upload", unordered)))
+    print("negative-offset: " + kind(client.getRange("k", -1, 10)))
+    print("zero-length: " + kind(client.getRangeBytes("k", 0, 0)))
+    print("open-negative: " + kind(client.open("k", -5)))
+    part: S3Part = S3Part(3, "\"abc\"", 7)
+    print(f"part={part.partNumber}:{part.etag}:{part.size}")
+    print(f"max-parts={S3.maxParts()}")
+}

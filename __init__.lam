@@ -24,8 +24,34 @@ go! {
         "github.com/aws/smithy-go"
     )
 
+    // s3ReadBody reads a response body of known ``size`` into one exactly
+    // sized buffer (io.ReadAll starts at 512 bytes and re-grows, copying a
+    // multi-MiB body many times). A shorter body is returned as is.
+    func s3ReadBody(body io.Reader, size int64) ([]byte, error) {
+        if size <= 0 {
+            return io.ReadAll(body)
+        }
+        buf := make([]byte, size)
+        n, err := io.ReadFull(body, buf)
+        if err == io.EOF || err == io.ErrUnexpectedEOF {
+            return buf[:n], nil
+        }
+        return buf[:n], err
+    }
+
     func s3Error(kind string, format string, args ...interface{}) *LAMMERGEIER.Error {
         return LAMMERGEIER.Error(kind, fmt.Sprintf(format, args...), nil)
+    }
+
+    func s3IsNotFound(err error) bool {
+        var apiErr smithy.APIError
+        if errors.As(err, &apiErr) {
+            switch apiErr.ErrorCode() {
+            case "NotFound", "NoSuchKey", "NoSuchBucket", "404":
+                return true
+            }
+        }
+        return false
     }
 }
 
@@ -94,6 +120,94 @@ class S3Object {
     }
 }
 
+class S3Part {
+    #- One uploaded part of a multipart upload. ``etag`` is the value S3
+       returned for the part and must be passed back unchanged to
+       ``completeMultipartUpload``. -#
+    func init(self, partNumber: int = 0, etag: str = "", size: int = 0) {
+        self.partNumber: int = partNumber
+        self.etag: str = etag
+        self.size: int = size
+    }
+}
+
+class S3ObjectReader {
+    #- Incremental reader over an object body (or a byte range of it),
+       returned by ``S3Client.open``. Read with ``readBytes``/``read`` until
+       an empty chunk signals EOF, then ``close``. ``raw`` is the native
+       ``io.ReadCloser`` for Go interop (for example ``io.Copy`` into an HTTP
+       response); reading it directly bypasses the EOF bookkeeping. -#
+    func init(self) {
+        self.key: str = ""
+        self.offset: int = 0
+        self.size: int = -1
+        self.objectSize: int = -1
+        self.contentType: str = ""
+        self.etag: str = ""
+        self.raw: any = None
+        self.closed: bool = false
+        self.eof: bool = false
+    }
+
+    func readBytes(self, maxBytes: int = 65536) -> Result[bytes] {
+        #- Read up to ``maxBytes`` bytes; an empty value means EOF. -#
+        go! {
+            if s.Closed || s.Eof {
+                return LAMMERGEIER.Result.Ok([]byte{})
+            }
+            body, ok := s.Raw.(io.Reader)
+            if !ok {
+                return LAMMERGEIER.Result.Err(s3Error("S3StreamError", "read %q: reader is not open", s.Key))
+            }
+            limit := maxBytes
+            if limit <= 0 {
+                limit = 65536
+            }
+            buf := make([]byte, limit)
+            for {
+                n, err := body.Read(buf)
+                if err == io.EOF {
+                    s.Eof = true
+                    return LAMMERGEIER.Result.Ok(buf[:n])
+                }
+                if err != nil {
+                    s.Eof = true
+                    return LAMMERGEIER.Result.Err(s3Error("S3StreamError", "read %q: %v", s.Key, err))
+                }
+                if n > 0 {
+                    return LAMMERGEIER.Result.Ok(buf[:n])
+                }
+            }
+        }
+    }
+
+    func read(self, maxBytes: int = 65536) -> Result[str] {
+        #- ``readBytes`` returning the chunk as a binary-safe string. -#
+        chunk: bytes = self.readBytes(maxBytes)?
+        out: str = ""
+        go! {
+            out = string(chunk)
+        }
+        return Result.Ok(out)
+    }
+
+    func close(self) -> Result[bool] {
+        #- Release the connection. Idempotent. -#
+        if self.closed {
+            return Result.Ok(true)
+        }
+        self.closed = true
+        go! {
+            if body, ok := s.Raw.(io.Closer); ok {
+                if err := body.Close(); err != nil {
+                    return LAMMERGEIER.Result.Err(s3Error("S3StreamError", "close %q: %v", s.Key, err))
+                }
+            }
+        }
+        return Result.Ok(true)
+    }
+}
+
 class S3Client {
     func init(self) {
         self.cfg: S3Config = S3Config()
@@ -102,11 +216,8 @@ class S3Client {
     }
 
     static func connect(cfg: S3Config) -> Result[S3Client] {
-        ready: Result[bool] = cfg.validate()
-        if not ready.ok() {
-            return ready
-        }
-        endpoint: str = S3.normalizeEndpoint(cfg.endpoint)
+        _ = cfg.validate()?
+        endpoint: str = S3.endpointUrl(cfg.endpoint)
         go! {
             awsCfg, err := config.LoadDefaultConfig(context.Background(),
                 config.WithRegion(cfg.Region),
@@ -118,7 +229,7 @@ class S3Client {
             client := NewS3Client()
             client.Cfg = cfg
             client.Raw = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-                o.BaseEndpoint = aws.String("https://" + endpoint)
+                o.BaseEndpoint = aws.String(endpoint)
                 o.UsePathStyle = cfg.UsePathStyle
             })
             client.Connected = true
@@ -136,10 +247,7 @@ class S3Client {
     }
 
     func _ready(self) -> Result[bool] {
-        ready: Result[bool] = self.cfg.validate()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self.cfg.validate()?
         if not self.connected {
             return Result.Err(Error("S3ConfigError", "S3 client is not connected; use S3Client.connect() or S3Client.fromEnv()", None))
         }
@@ -147,10 +255,7 @@ class S3Client {
     }
 
     func put(self, key: str, data: str, contentType: str = "text/plain") -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
@@ -167,14 +272,18 @@ class S3Client {
     }
 
     func put(self, key: str, data: list[int], contentType: str = "application/octet-stream") -> Result[bool] {
-        return self.put(key, Bytes.fromBytes(data), contentType)
+        text: str = Bytes.fromBytes(data)
+        return self.put(key, text, contentType)
     }
 
     func put(self, key: str, stream: any, contentType: str = "application/octet-stream") -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        return self.putStream(key, stream, contentType)
+    }
+
+    func putStream(self, key: str, stream: any, contentType: str = "application/octet-stream") -> Result[bool] {
+        #- Upload from a native ``io.Reader``. Unambiguous spelling of the
+           ``put(key, stream: any)`` overload for ``any``-typed values. -#
+        _ = self._ready()?
         go! {
             reader, ok := stream.(io.Reader)
             if !ok {
@@ -195,10 +304,7 @@ class S3Client {
     }
 
     func uploadFile(self, localPath: str, key: str, contentType: str = "application/octet-stream") -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             f, err := os.Open(localPath)
             if err != nil {
@@ -220,10 +326,7 @@ class S3Client {
     }
 
     func get(self, key: str) -> Result[str] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
@@ -234,7 +337,7 @@ class S3Client {
                 return LAMMERGEIER.Result.Err(s3Error("S3GetError", "get %q: %v", key, err))
             }
             defer out.Body.Close()
-            data, err := io.ReadAll(out.Body)
+            data, err := s3ReadBody(out.Body, aws.ToInt64(out.ContentLength))
             if err != nil {
                 return LAMMERGEIER.Result.Err(s3Error("S3GetError", "read %q: %v", key, err))
             }
@@ -243,10 +346,7 @@ class S3Client {
     }
 
     func downloadFile(self, key: str, localPath: str) -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
@@ -257,11 +357,16 @@ class S3Client {
                 return LAMMERGEIER.Result.Err(s3Error("S3GetError", "download %q: %v", key, err))
             }
             defer out.Body.Close()
-            data, err := io.ReadAll(out.Body)
+            // Stream to disk: an object can be far larger than memory.
+            file, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
             if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3FileError", "write %q: %v", localPath, err))
+            }
+            if _, err := io.Copy(file, out.Body); err != nil {
+                file.Close()
                 return LAMMERGEIER.Result.Err(s3Error("S3GetError", "read %q: %v", key, err))
             }
-            if err := os.WriteFile(localPath, data, 0644); err != nil {
+            if err := file.Close(); err != nil {
                 return LAMMERGEIER.Result.Err(s3Error("S3FileError", "write %q: %v", localPath, err))
             }
             return LAMMERGEIER.Result.Ok(true)
@@ -269,10 +374,7 @@ class S3Client {
     }
 
     func delete(self, key: str) -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             _, err := client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
@@ -287,10 +389,7 @@ class S3Client {
     }
 
     func deleteMany(self, keys: list[str]) -> Result[int] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         if len(keys) == 0 {
             return Result.Ok(0)
         }
@@ -319,10 +418,7 @@ class S3Client {
     }
 
     func exists(self, key: str) -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             _, err := client.HeadObject(context.Background(), &s3.HeadObjectInput{
@@ -341,10 +437,7 @@ class S3Client {
     }
 
     func list(self, prefix: str = "") -> Result[list[S3Object]] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
@@ -385,10 +478,7 @@ class S3Client {
     }
 
     func stat(self, key: str) -> Result[S3Object] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.HeadObject(context.Background(), &s3.HeadObjectInput{
@@ -418,10 +508,7 @@ class S3Client {
     }
 
     func copy(self, sourceKey: str, destKey: str, contentType: str = "") -> Result[bool] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             source := s.Cfg.Bucket + "/" + strings.ReplaceAll(url.PathEscape(sourceKey), "%2F", "/")
@@ -455,10 +542,7 @@ class S3Client {
     }
 
     func presignGet(self, key: str, expiresSeconds: int = 900) -> Result[str] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             presigner := s3.NewPresignClient(client)
@@ -477,10 +561,7 @@ class S3Client {
     }
 
     func presignPut(self, key: str, contentType: str = "application/octet-stream", expiresSeconds: int = 900) -> Result[str] {
-        ready: Result[bool] = self._ready()
-        if not ready.ok() {
-            return ready
-        }
+        _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
             presigner := s3.NewPresignClient(client)
@@ -499,17 +580,334 @@ class S3Client {
         }
     }
 
+    func put(self, key: str, data: bytes, contentType: str = "application/octet-stream") -> Result[bool] {
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+                Bucket:        aws.String(s.Cfg.Bucket),
+                Key:           aws.String(key),
+                Body:          bytes.NewReader(data),
+                ContentLength: aws.Int64(int64(len(data))),
+                ContentType:   aws.String(contentType),
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3PutError", "put %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
+    # ── buckets ───────────────────────────────────────────────────────
+
+    func bucketExists(self) -> Result[bool] {
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            _, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{Bucket: aws.String(s.Cfg.Bucket)})
+            if err == nil {
+                return LAMMERGEIER.Result.Ok(true)
+            }
+            if s3IsNotFound(err) {
+                return LAMMERGEIER.Result.Ok(false)
+            }
+            return LAMMERGEIER.Result.Err(s3Error("S3BucketError", "head bucket %q: %v", s.Cfg.Bucket, err))
+        }
+    }
+
+    func createBucket(self) -> Result[bool] {
+        #- Create the configured bucket. ``Ok(false)`` when it already exists
+           and is owned by these credentials. -#
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            _, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(s.Cfg.Bucket)})
+            if err == nil {
+                return LAMMERGEIER.Result.Ok(true)
+            }
+            var owned *types.BucketAlreadyOwnedByYou
+            if errors.As(err, &owned) {
+                return LAMMERGEIER.Result.Ok(false)
+            }
+            return LAMMERGEIER.Result.Err(s3Error("S3BucketError", "create bucket %q: %v", s.Cfg.Bucket, err))
+        }
+    }
+
+    func ensureBucket(self) -> Result[bool] {
+        #- Create the configured bucket when it does not exist yet. -#
+        exists: bool = self.bucketExists()?
+        if not exists {
+            _ = self.createBucket()?
+        }
+        return Result.Ok(true)
+    }
+
+    # ── ranged and streaming reads ────────────────────────────────────
+
+    func getRangeBytes(self, key: str, offset: int, length: int) -> Result[bytes] {
+        #- Read ``length`` bytes starting at ``offset`` (fewer at the end of
+           the object). -#
+        _ = S3.checkRange(key, offset, length)?
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+                Bucket: aws.String(s.Cfg.Bucket),
+                Key:    aws.String(key),
+                Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "get range %d+%d of %q: %v", offset, length, key, err))
+            }
+            defer out.Body.Close()
+            data, err := s3ReadBody(io.LimitReader(out.Body, int64(length)), int64(length))
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "read range of %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(data)
+        }
+    }
+
+    func getRange(self, key: str, offset: int, length: int) -> Result[str] {
+        #- ``getRangeBytes`` returning a binary-safe string. -#
+        data: bytes = self.getRangeBytes(key, offset, length)?
+        out: str = ""
+        go! {
+            out = string(data)
+        }
+        return Result.Ok(out)
+    }
+
+    func open(self, key: str, offset: int = 0, length: int = -1) -> Result[S3ObjectReader] {
+        #- Stream the object from ``offset``; ``length < 0`` reads to the end. -#
+        if key == "" {
+            return Result.Err(Error("S3ArgumentError", "open: key must not be empty", None))
+        }
+        if offset < 0 or length == 0 {
+            return Result.Err(Error("S3ArgumentError", f"open {key}: offset must be >= 0 and length non-zero", None))
+        }
+        _ = self._ready()?
+        reader: S3ObjectReader = S3ObjectReader()
+        reader.key = key
+        reader.offset = offset
+        go! {
+            input := &s3.GetObjectInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key)}
+            if length > 0 {
+                input.Range = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+            } else if offset > 0 {
+                input.Range = aws.String(fmt.Sprintf("bytes=%d-", offset))
+            }
+            out, err := s.Raw.(*s3.Client).GetObject(context.Background(), input)
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3GetError", "open %q: %v", key, err))
+            }
+            reader.Raw = out.Body
+            if out.ContentLength != nil {
+                reader.Size = int(*out.ContentLength)
+            }
+            reader.ObjectSize = reader.Size
+            if out.ContentRange != nil {
+                if slash := strings.LastIndex(*out.ContentRange, "/"); slash >= 0 {
+                    fmt.Sscanf((*out.ContentRange)[slash+1:], "%d", &reader.ObjectSize)
+                }
+            }
+            if out.ContentType != nil {
+                reader.ContentType = *out.ContentType
+            }
+            if out.ETag != nil {
+                reader.Etag = *out.ETag
+            }
+        }
+        return Result.Ok(reader)
+    }
+
+    # ── multipart uploads ─────────────────────────────────────────────
+
+    func createMultipartUpload(self, key: str, contentType: str = "application/octet-stream") -> Result[str] {
+        #- Start a multipart upload and return its upload id. -#
+        if key == "" {
+            return Result.Err(Error("S3ArgumentError", "createMultipartUpload: key must not be empty", None))
+        }
+        _ = self._ready()?
+        go! {
+            out, err := s.Raw.(*s3.Client).CreateMultipartUpload(context.Background(), &s3.CreateMultipartUploadInput{
+                Bucket:      aws.String(s.Cfg.Bucket),
+                Key:         aws.String(key),
+                ContentType: aws.String(contentType),
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3MultipartError", "create multipart upload %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(aws.ToString(out.UploadId))
+        }
+    }
+
+    func uploadPart(self, key: str, uploadId: str, partNumber: int, data: bytes) -> Result[S3Part] {
+        #- Upload part ``partNumber`` (1..10000). Every part except the last
+           must be at least 5 MiB on AWS S3. -#
+        _ = S3.checkPart(key, uploadId, partNumber)?
+        _ = self._ready()?
+        go! {
+            out, err := s.Raw.(*s3.Client).UploadPart(context.Background(), &s3.UploadPartInput{
+                Bucket:        aws.String(s.Cfg.Bucket),
+                Key:           aws.String(key),
+                UploadId:      aws.String(uploadId),
+                PartNumber:    aws.Int32(int32(partNumber)),
+                Body:          bytes.NewReader(data),
+                ContentLength: aws.Int64(int64(len(data))),
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3MultipartError", "upload part %d of %q: %v", partNumber, key, err))
+            }
+            return LAMMERGEIER.Result.Ok(NewS3Part(partNumber, aws.ToString(out.ETag), len(data)))
+        }
+    }
+
+    func uploadPart(self, key: str, uploadId: str, partNumber: int, data: str) -> Result[S3Part] {
+        raw: bytes = go!([]byte(data))
+        return self.uploadPart(key, uploadId, partNumber, raw)
+    }
+
+    func uploadPart(self, key: str, uploadId: str, partNumber: int, data: list[int]) -> Result[S3Part] {
+        raw: bytes = go!([]byte(Bytes_fromBytes(data)))
+        return self.uploadPart(key, uploadId, partNumber, raw)
+    }
+
+    func listParts(self, key: str, uploadId: str) -> Result[list[S3Part]] {
+        #- Every part uploaded so far, in part-number order (follows pagination). -#
+        _ = S3.checkPart(key, uploadId, 1)?
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            parts := make([]*S3Part, 0)
+            var marker *string
+            for {
+                out, err := client.ListParts(context.Background(), &s3.ListPartsInput{
+                    Bucket:           aws.String(s.Cfg.Bucket),
+                    Key:              aws.String(key),
+                    UploadId:         aws.String(uploadId),
+                    PartNumberMarker: marker,
+                })
+                if err != nil {
+                    return LAMMERGEIER.Result.Err(s3Error("S3MultipartError", "list parts of %q: %v", key, err))
+                }
+                for _, p := range out.Parts {
+                    parts = append(parts, NewS3Part(int(aws.ToInt32(p.PartNumber)), aws.ToString(p.ETag), int(aws.ToInt64(p.Size))))
+                }
+                if !aws.ToBool(out.IsTruncated) || out.NextPartNumberMarker == nil {
+                    break
+                }
+                marker = out.NextPartNumberMarker
+            }
+            return LAMMERGEIER.Result.Ok(parts)
+        }
+    }
+
+    func completeMultipartUpload(self, key: str, uploadId: str, parts: list[S3Part]) -> Result[bool] {
+        #- Assemble the uploaded parts (ascending part numbers) into the object. -#
+        _ = S3.checkPart(key, uploadId, 1)?
+        if len(parts) == 0 {
+            return Result.Err(Error("S3ArgumentError", f"complete {key}: at least one part is required", None))
+        }
+        previous: int = 0
+        for part in parts {
+            if part.partNumber <= previous or part.partNumber > S3.maxParts() {
+                return Result.Err(Error("S3ArgumentError", f"complete {key}: part numbers must be ascending within 1..{S3.maxParts()}", None))
+            }
+            previous = part.partNumber
+        }
+        _ = self._ready()?
+        go! {
+            completed := make([]types.CompletedPart, 0, len(parts))
+            for _, p := range parts {
+                completed = append(completed, types.CompletedPart{PartNumber: aws.Int32(int32(p.PartNumber)), ETag: aws.String(p.Etag)})
+            }
+            _, err := s.Raw.(*s3.Client).CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
+                Bucket:          aws.String(s.Cfg.Bucket),
+                Key:             aws.String(key),
+                UploadId:        aws.String(uploadId),
+                MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3MultipartError", "complete multipart upload %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
+    func abortMultipartUpload(self, key: str, uploadId: str) -> Result[bool] {
+        #- Discard an unfinished multipart upload and its stored parts. -#
+        _ = S3.checkPart(key, uploadId, 1)?
+        _ = self._ready()?
+        go! {
+            _, err := s.Raw.(*s3.Client).AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
+                Bucket:   aws.String(s.Cfg.Bucket),
+                Key:      aws.String(key),
+                UploadId: aws.String(uploadId),
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3MultipartError", "abort multipart upload %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
     func publicUrl(self, key: str) -> str {
         return S3.publicUrl(self.cfg.publicEndpoint, key)
     }
 }
 
 class S3 {
+    static func endpointUrl(endpoint: str) -> str {
+        #- API endpoint URL handed to the SDK. An explicit ``http://`` or
+           ``https://`` scheme is kept (local MinIO/SeaweedFS gateways use
+           plain HTTP); a bare host defaults to HTTPS. -#
+        trimmed: str = endpoint.trim()
+        lower: str = trimmed.toLower()
+        scheme: str = "https://"
+        if lower.startsWith("http://") {
+            scheme = "http://"
+        }
+        host: str = S3.normalizeEndpoint(trimmed)
+        if host == "" {
+            return ""
+        }
+        return scheme + host
+    }
+
+    static func maxParts() -> int {
+        return 10000
+    }
+
+    static func checkPart(key: str, uploadId: str, partNumber: int) -> Result[bool] {
+        if key == "" {
+            return Result.Err(Error("S3ArgumentError", "multipart: key must not be empty", None))
+        }
+        if uploadId == "" {
+            return Result.Err(Error("S3ArgumentError", f"multipart {key}: upload id must not be empty", None))
+        }
+        if partNumber < 1 or partNumber > S3.maxParts() {
+            return Result.Err(Error("S3ArgumentError", f"multipart {key}: part number {partNumber} is outside 1..{S3.maxParts()}", None))
+        }
+        return Result.Ok(true)
+    }
+
+    static func checkRange(key: str, offset: int, length: int) -> Result[bool] {
+        if key == "" {
+            return Result.Err(Error("S3ArgumentError", "range read: key must not be empty", None))
+        }
+        if offset < 0 or length <= 0 {
+            return Result.Err(Error("S3ArgumentError", f"range read {key}: offset must be >= 0 and length > 0", None))
+        }
+        return Result.Ok(true)
+    }
+
     static func normalizeEndpoint(endpoint: str) -> str {
         out: str = endpoint.trim()
-        if out.startsWith("https://") {
+        lower: str = out.toLower()
+        if lower.startsWith("https://") {
             out = out[8:]
-        } elif out.startsWith("http://") {
+        } elif lower.startsWith("http://") {
             out = out[7:]
         }
         return out.trimRight("/")
