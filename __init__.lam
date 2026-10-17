@@ -8,6 +8,8 @@ go! {
     import (
         "bytes"
         "context"
+        "crypto/md5"
+        "encoding/base64"
         "errors"
         "fmt"
         "io"
@@ -37,6 +39,21 @@ go! {
             return buf[:n], nil
         }
         return buf[:n], err
+    }
+
+    // SSE-C header values (nil when the client has no customer key).
+    func s3Ptr(v string) *string {
+        if v == "" {
+            return nil
+        }
+        return aws.String(v)
+    }
+
+    func s3SseAlg(key string) *string {
+        if key == "" {
+            return nil
+        }
+        return aws.String("AES256")
     }
 
     func s3Error(kind string, format string, args ...interface{}) *LAMMERGEIER.Error {
@@ -213,6 +230,39 @@ class S3Client {
         self.cfg: S3Config = S3Config()
         self.raw: any = None
         self.connected: bool = false
+        # SSE-C: base64 key and its MD5, "" = no customer key.
+        self.sseKey: str = ""
+        self.sseKeyMd5: str = ""
+    }
+
+    func withCustomerKey(self, hexKey: str) -> Result[S3Client] {
+        #- A client sharing this connection whose object operations use
+           server-side encryption with a customer-provided key (SSE-C,
+           AES-256): ``hexKey`` is 32 bytes as 64 hex characters. The store
+           keeps only a hash of the key; reading the object needs the same
+           key, so losing it loses the data. Presigned URLs are refused
+           (they cannot carry the key). ``""`` returns a client without key. -#
+        clone: S3Client = S3Client()
+        clone.cfg = self.cfg
+        clone.raw = self.raw
+        clone.connected = self.connected
+        if hexKey == "" {
+            return Result.Ok(clone)
+        }
+        raw: str = Bytes.hexDecode(hexKey.trim().toLower())?
+        if len(raw) != 32 {
+            return Result.Err(Error("S3ArgumentError", "withCustomerKey: the key must be 32 bytes (64 hex characters)", None))
+        }
+        go! {
+            sum := md5.Sum([]byte(raw))
+            clone.SseKey = base64.StdEncoding.EncodeToString([]byte(raw))
+            clone.SseKeyMd5 = base64.StdEncoding.EncodeToString(sum[:])
+        }
+        return Result.Ok(clone)
+    }
+
+    func hasCustomerKey(self) -> bool {
+        return self.sseKey != ""
     }
 
     static func connect(cfg: S3Config) -> Result[S3Client] {
@@ -259,6 +309,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket:      aws.String(s.Cfg.Bucket),
                 Key:         aws.String(key),
                 Body:        bytes.NewReader([]byte(data)),
@@ -291,6 +342,7 @@ class S3Client {
             }
             client := s.Raw.(*s3.Client)
             _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket:      aws.String(s.Cfg.Bucket),
                 Key:         aws.String(key),
                 Body:        reader,
@@ -313,6 +365,7 @@ class S3Client {
             defer f.Close()
             client := s.Raw.(*s3.Client)
             _, err = client.PutObject(context.Background(), &s3.PutObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket:      aws.String(s.Cfg.Bucket),
                 Key:         aws.String(key),
                 Body:        f,
@@ -330,6 +383,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket: aws.String(s.Cfg.Bucket),
                 Key:    aws.String(key),
             })
@@ -350,6 +404,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket: aws.String(s.Cfg.Bucket),
                 Key:    aws.String(key),
             })
@@ -422,6 +477,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             _, err := client.HeadObject(context.Background(), &s3.HeadObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket: aws.String(s.Cfg.Bucket),
                 Key:    aws.String(key),
             })
@@ -482,6 +538,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.HeadObject(context.Background(), &s3.HeadObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket: aws.String(s.Cfg.Bucket),
                 Key:    aws.String(key),
             })
@@ -516,6 +573,7 @@ class S3Client {
                 Bucket:     aws.String(s.Cfg.Bucket),
                 Key:        aws.String(destKey),
                 CopySource: aws.String(source),
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
             }
             if contentType != "" {
                 input.ContentType = aws.String(contentType)
@@ -527,6 +585,127 @@ class S3Client {
             }
             return LAMMERGEIER.Result.Ok(true)
         }
+    }
+
+    func copyFrom(self, sourceKey: str, destKey: str, sourceCustomerKey: str = "") -> Result[bool] {
+        #- Server-side copy (up to 5 GiB) where the source may be encrypted
+           with another customer key (``sourceCustomerKey``, 64 hex
+           characters) than this client's. -#
+        _ = self._ready()?
+        source: S3Client = self.withCustomerKey(sourceCustomerKey)?
+        go! {
+            client := s.Raw.(*s3.Client)
+            input := &s3.CopyObjectInput{
+                Bucket:     aws.String(s.Cfg.Bucket),
+                Key:        aws.String(destKey),
+                CopySource: aws.String(s.Cfg.Bucket + "/" + strings.ReplaceAll(url.PathEscape(sourceKey), "%2F", "/")),
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
+                CopySourceSSECustomerAlgorithm: s3SseAlg(source.SseKey), CopySourceSSECustomerKey: s3Ptr(source.SseKey), CopySourceSSECustomerKeyMD5: s3Ptr(source.SseKeyMd5),
+            }
+            if _, err := client.CopyObject(context.Background(), input); err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3CopyError", "copy %q to %q: %v", sourceKey, destKey, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
+    func copyLarge(self, sourceKey: str, destKey: str, size: int, sourceCustomerKey: str = "", partSize: int = 1073741824) -> Result[bool] {
+        #- Server-side multipart copy (``UploadPartCopy``) for objects of any
+           size (a single copy is limited to 5 GiB). ``size`` is the source
+           size; ``partSize`` at least 5 MiB. Stores that answer
+           ``NotImplemented`` (no UploadPartCopy, or none with SSE-C) get a
+           part-by-part copy through the client instead. Aborts the upload
+           on failure. -#
+        if size < 0 or partSize < 5242880 {
+            return Result.Err(Error("S3ArgumentError", "copyLarge: size must be >= 0 and partSize at least 5 MiB", None))
+        }
+        if size <= partSize {
+            return self.copyFrom(sourceKey, destKey, sourceCustomerKey)
+        }
+        _ = self._ready()?
+        source: S3Client = self.withCustomerKey(sourceCustomerKey)?
+        uploadId: str = self.createMultipartUpload(destKey)?
+        failure: str = ""
+        go! {
+            client := s.Raw.(*s3.Client)
+            copySource := aws.String(s.Cfg.Bucket + "/" + strings.ReplaceAll(url.PathEscape(sourceKey), "%2F", "/"))
+            var parts []types.CompletedPart
+            for number, offset := int32(1), 0; offset < size; number, offset = number+1, offset+partSize {
+                last := offset + partSize - 1
+                if last >= size {
+                    last = size - 1
+                }
+                out, err := client.UploadPartCopy(context.Background(), &s3.UploadPartCopyInput{
+                    Bucket:          aws.String(s.Cfg.Bucket),
+                    Key:             aws.String(destKey),
+                    UploadId:        aws.String(uploadId),
+                    PartNumber:      aws.Int32(number),
+                    CopySource:      copySource,
+                    CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", offset, last)),
+                    SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
+                    CopySourceSSECustomerAlgorithm: s3SseAlg(source.SseKey), CopySourceSSECustomerKey: s3Ptr(source.SseKey), CopySourceSSECustomerKeyMD5: s3Ptr(source.SseKeyMd5),
+                })
+                if err != nil {
+                    failure = fmt.Sprintf("copy part %d of %q: %v", number, sourceKey, err)
+                    break
+                }
+                parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(number), ETag: out.CopyPartResult.ETag})
+            }
+            if failure == "" {
+                _, err := client.CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
+                    Bucket:          aws.String(s.Cfg.Bucket),
+                    Key:             aws.String(destKey),
+                    UploadId:        aws.String(uploadId),
+                    MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+                    SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
+                })
+                if err != nil {
+                    failure = fmt.Sprintf("complete copy of %q: %v", sourceKey, err)
+                }
+            }
+        }
+        if failure != "" {
+            _ = self.abortMultipartUpload(destKey, uploadId)
+            if failure.contains("NotImplemented") {
+                # Some S3-compatible stores lack UploadPartCopy (or lack it
+                # with SSE-C): copy part by part through this client.
+                return self._copyStreamed(source, sourceKey, destKey, size, partSize)
+            }
+            return Result.Err(Error("S3CopyError", failure, None))
+        }
+        return Result.Ok(true)
+    }
+
+    func _copyStreamed(self, source: S3Client, sourceKey: str, destKey: str, size: int, partSize: int) -> Result[bool] {
+        uploadId: str = self.createMultipartUpload(destKey)?
+        parts: list[S3Part] = []
+        offset: int = 0
+        number: int = 1
+        while offset < size {
+            length: int = size - offset
+            if length > partSize {
+                length = partSize
+            }
+            data: Result[bytes] = source.getRangeBytes(sourceKey, offset, length)
+            if not data.ok() {
+                _ = self.abortMultipartUpload(destKey, uploadId)
+                return Result.Err(data.error)
+            }
+            uploaded: Result[S3Part] = self.uploadPart(destKey, uploadId, number, data.unwrap())
+            if not uploaded.ok() {
+                _ = self.abortMultipartUpload(destKey, uploadId)
+                return Result.Err(uploaded.error)
+            }
+            parts.append(uploaded.unwrap())
+            offset += length
+            number += 1
+        }
+        completed: Result[bool] = self.completeMultipartUpload(destKey, uploadId, parts)
+        if not completed.ok() {
+            _ = self.abortMultipartUpload(destKey, uploadId)
+            return completed
+        }
+        return Result.Ok(true)
     }
 
     func move(self, sourceKey: str, destKey: str, contentType: str = "") -> Result[bool] {
@@ -542,6 +721,9 @@ class S3Client {
     }
 
     func presignGet(self, key: str, expiresSeconds: int = 900) -> Result[str] {
+        if self.sseKey != "" {
+            return Result.Err(Error("S3ArgumentError", "presigned URLs cannot carry a customer encryption key (SSE-C)", None))
+        }
         _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
@@ -561,6 +743,9 @@ class S3Client {
     }
 
     func presignPut(self, key: str, contentType: str = "application/octet-stream", expiresSeconds: int = 900) -> Result[str] {
+        if self.sseKey != "" {
+            return Result.Err(Error("S3ArgumentError", "presigned URLs cannot carry a customer encryption key (SSE-C)", None))
+        }
         _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
@@ -585,6 +770,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket:        aws.String(s.Cfg.Bucket),
                 Key:           aws.String(key),
                 Body:          bytes.NewReader(data),
@@ -652,6 +838,7 @@ class S3Client {
         go! {
             client := s.Raw.(*s3.Client)
             out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket: aws.String(s.Cfg.Bucket),
                 Key:    aws.String(key),
                 Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
@@ -691,7 +878,7 @@ class S3Client {
         reader.key = key
         reader.offset = offset
         go! {
-            input := &s3.GetObjectInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key)}
+            input := &s3.GetObjectInput{SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5), Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key)}
             if length > 0 {
                 input.Range = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
             } else if offset > 0 {
@@ -731,6 +918,7 @@ class S3Client {
         _ = self._ready()?
         go! {
             out, err := s.Raw.(*s3.Client).CreateMultipartUpload(context.Background(), &s3.CreateMultipartUploadInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket:      aws.String(s.Cfg.Bucket),
                 Key:         aws.String(key),
                 ContentType: aws.String(contentType),
@@ -749,6 +937,7 @@ class S3Client {
         _ = self._ready()?
         go! {
             out, err := s.Raw.(*s3.Client).UploadPart(context.Background(), &s3.UploadPartInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Bucket:        aws.String(s.Cfg.Bucket),
                 Key:           aws.String(key),
                 UploadId:      aws.String(uploadId),
@@ -824,6 +1013,7 @@ class S3Client {
             }
             _, err := s.Raw.(*s3.Client).CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
                 Bucket:          aws.String(s.Cfg.Bucket),
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
                 Key:             aws.String(key),
                 UploadId:        aws.String(uploadId),
                 MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},

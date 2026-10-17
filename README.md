@@ -206,6 +206,23 @@ func countBytes(s3: S3Client, key: str) -> Result[int] {
 `S3ObjectReader.raw` is the native `io.ReadCloser`, for Go interop such as
 copying a range straight into an HTTP response.
 
+## Encryption with customer keys (SSE-C)
+
+```lammergeier
+plain: S3Client = S3Client.fromEnv()?
+keyed: S3Client = plain.withCustomerKey(hexKey)?     # 64 hex characters
+_ = keyed.put("reports/q3.pdf", data, "application/pdf")?
+body: str = keyed.get("reports/q3.pdf")?            # plain.get(...) fails
+_ = other.copyFrom("reports/q3.pdf", "archive/q3.pdf", hexKey)?
+_ = keyed.copyLarge("big.iso", "copy.iso", size)?   # objects above 5 GiB
+```
+
+The store keeps only a hash of the key: reading needs the same key, and
+losing it loses the data. Every object operation of a keyed client sends the
+key (puts, gets, ranges, streams, stat, multipart, copies); presigned URLs
+are refused. `copyLarge` uses `UploadPartCopy` and falls back to a
+part-by-part copy through the client where the store does not implement it.
+
 ## Buckets
 
 `bucketExists()` returns `Ok(false)` only when the configured bucket is

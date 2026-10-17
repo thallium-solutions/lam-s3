@@ -2,6 +2,31 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## 2.2.0 - 2026-10-24
+
+### Added
+
+- Server-side encryption with customer-provided keys (SSE-C):
+  `S3Client.withCustomerKey(hexKey)` returns a client sharing the connection
+  whose puts, gets, ranged and streaming reads, stat/exists, multipart
+  uploads and copies send the AES-256 key (32 bytes, 64 hex characters).
+  Presigned URLs are refused for such clients (they cannot carry the key).
+  `hasCustomerKey()`.
+- `copyFrom(sourceKey, destKey, sourceCustomerKey = "")`: server-side copy
+  where the source is encrypted with another customer key (or none).
+- `copyLarge(sourceKey, destKey, size, sourceCustomerKey = "", partSize)`:
+  multipart server-side copy (`UploadPartCopy`) for objects above the 5 GiB
+  single-copy limit; stores that answer `NotImplemented` (no UploadPartCopy,
+  or none with SSE-C, as SeaweedFS) are copied part by part through the
+  client instead.
+
+### Testing
+
+- `tests/live_sse_c.lam` (live, `LAM_S3_LIVE_TESTS=1`): round trip with a
+  key, reads without the key or with another key refused, ranged and
+  streaming reads, multipart upload, copy between keys, large copy with and
+  without keys, presign refusal, invalid keys. Verified against SeaweedFS.
+
 ## 2.1.0 - 2026-10-15
 
 ### Added

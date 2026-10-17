@@ -1,0 +1,96 @@
+# Live test: server-side encryption with customer keys (SSE-C).
+#
+# expect: put=true
+# expect: get_with_key=true
+# expect: get_without_key_refused=true
+# expect: get_wrong_key_refused=true
+# expect: stat_with_key=true
+# expect: range=true
+# expect: stream=true
+# expect: multipart=true
+# expect: copy_between_keys=true
+# expect: copy_large=true
+# expect: copy_large_plain=true
+# expect: presign_refused=true
+# expect: bad_key_refused=true
+# expect: live_sse_c_ok
+
+from @lam/s3 import S3, S3Client, S3Object, S3ObjectReader, S3Part
+from lamerrors import Result
+
+go! {
+    import (
+        "os"
+    )
+}
+
+const KeyA: str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+const KeyB: str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+
+func main() {
+    liveEnabled: bool = go!(os.Getenv("LAM_S3_LIVE_TESTS") == "1")
+    if not liveEnabled {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
+        return
+    }
+    if not S3.hasEnv() {
+        print("missing S3 env")
+        return
+    }
+    plain: S3Client = S3Client.fromEnv().unwrap()
+    _ = plain.ensureBucket()
+    a: S3Client = plain.withCustomerKey(KeyA).unwrap()
+    b: S3Client = plain.withCustomerKey(KeyB).unwrap()
+    prefix: str = "lam-s3-tests/sse-c/"
+    key: str = prefix + "secret.txt"
+    body: str = "confidential payload 0123456789"
+
+    print(f"put={a.put(key, body).ok()}")
+    got: Result[str] = a.get(key)
+    print(f"get_with_key={got.ok() and got.unwrap() == body}")
+    print(f"get_without_key_refused={not plain.get(key).ok()}")
+    print(f"get_wrong_key_refused={not b.get(key).ok()}")
+    info: Result[S3Object] = a.stat(key)
+    print(f"stat_with_key={info.ok() and info.unwrap().size == len(body)}")
+    part: Result[str] = a.getRange(key, 13, 7)
+    print(f"range={part.ok() and part.unwrap() == 'payload'}")
+    reader: S3ObjectReader = a.open(key, 0, -1).unwrap()
+    streamed: str = reader.read(1024).unwrap()
+    _ = reader.close()
+    print(f"stream={streamed == body}")
+
+    big: str = prefix + "big.bin"
+    chunk: str = "x" * 5242880
+    uploadId: str = a.createMultipartUpload(big).unwrap()
+    p1: S3Part = a.uploadPart(big, uploadId, 1, chunk).unwrap()
+    p2: S3Part = a.uploadPart(big, uploadId, 2, "tail").unwrap()
+    completed: Result[bool] = a.completeMultipartUpload(big, uploadId, [p1, p2])
+    bigInfo: Result[S3Object] = a.stat(big)
+    print(f"multipart={completed.ok() and bigInfo.ok() and bigInfo.unwrap().size == 5242884}")
+
+    copyKey: str = prefix + "copy.txt"
+    copied: Result[bool] = b.copyFrom(key, copyKey, KeyA)
+    copyBody: Result[str] = b.get(copyKey)
+    print(f"copy_between_keys={copied.ok() and copyBody.ok() and copyBody.unwrap() == body and not a.get(copyKey).ok()}")
+
+    largeKey: str = prefix + "large-copy.bin"
+    large: Result[bool] = b.copyLarge(big, largeKey, 5242884, KeyA, 5242880)
+    largeInfo: Result[S3Object] = b.stat(largeKey)
+    tail: Result[str] = b.getRange(largeKey, 5242880, 4)
+    print(f"copy_large={large.ok() and largeInfo.ok() and largeInfo.unwrap().size == 5242884 and tail.ok() and tail.unwrap() == 'tail'}")
+
+    plainBig: str = prefix + "plain-big.bin"
+    plainCopy: str = prefix + "plain-big-copy.bin"
+    plainBody: str = chunk + "end"
+    _ = plain.put(plainBig, plainBody)
+    plainLarge: Result[bool] = plain.copyLarge(plainBig, plainCopy, 5242883, "", 5242880)
+    plainTail: Result[str] = plain.getRange(plainCopy, 5242880, 3)
+    print(f"copy_large_plain={plainLarge.ok() and plainTail.ok() and plainTail.unwrap() == 'end'}")
+
+    print(f"presign_refused={not a.presignGet(key).ok()}")
+    print(f"bad_key_refused={not plain.withCustomerKey('abcd').ok()}")
+    for k in [key, big, copyKey, largeKey, plainBig, plainCopy] {
+        _ = plain.delete(k)
+    }
+    print("live_sse_c_ok")
+}
