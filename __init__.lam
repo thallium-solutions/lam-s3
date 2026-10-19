@@ -952,6 +952,78 @@ class S3Client {
         }
     }
 
+    func uploadPartReader(self, key: str, uploadId: str, partNumber: int, reader: any, size: int) -> Result[S3Part] {
+        #- Upload part ``partNumber`` from a native ``io.ReadSeeker`` holding
+           exactly ``size`` bytes (an ``*os.File``, an ``io.SectionReader``):
+           the part is streamed, never held in memory, and re-read from the
+           start when the SDK retries. -#
+        _ = S3.checkPart(key, uploadId, partNumber)?
+        if size < 0 {
+            return Result.Err(Error("S3ArgumentError", f"multipart {key}: part size {size} is negative", None))
+        }
+        go! {
+            if _, ok := reader.(io.ReadSeeker); !ok {
+                return LAMMERGEIER.Result.Err(s3Error("S3TypeError", "upload part %d of %q: value does not implement io.ReadSeeker", partNumber, key))
+            }
+        }
+        _ = self._ready()?
+        go! {
+            out, err := s.Raw.(*s3.Client).UploadPart(context.Background(), &s3.UploadPartInput{
+                SSECustomerAlgorithm: s3SseAlg(s.SseKey), SSECustomerKey: s3Ptr(s.SseKey), SSECustomerKeyMD5: s3Ptr(s.SseKeyMd5),
+                Bucket:        aws.String(s.Cfg.Bucket),
+                Key:           aws.String(key),
+                UploadId:      aws.String(uploadId),
+                PartNumber:    aws.Int32(int32(partNumber)),
+                Body:          reader.(io.ReadSeeker),
+                ContentLength: aws.Int64(int64(size)),
+            })
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3MultipartError", "upload part %d of %q: %v", partNumber, key, err))
+            }
+            return LAMMERGEIER.Result.Ok(NewS3Part(partNumber, aws.ToString(out.ETag), size))
+        }
+    }
+
+    func uploadPartFile(self, key: str, uploadId: str, partNumber: int, localPath: str, offset: int = 0, length: int = -1) -> Result[S3Part] {
+        #- Upload part ``partNumber`` from ``length`` bytes of a local file
+           starting at ``offset`` (to the end of the file when ``length`` is
+           negative), streamed from disk. -#
+        _ = S3.checkPart(key, uploadId, partNumber)?
+        if offset < 0 {
+            return Result.Err(Error("S3ArgumentError", f"multipart {key}: file offset {offset} is negative", None))
+        }
+        file: any = None
+        size: int = 0
+        problem: str = ""
+        go! {
+            f, err := os.Open(localPath)
+            if err != nil {
+                problem = fmt.Sprintf("open %q: %v", localPath, err)
+            } else if info, err := f.Stat(); err != nil {
+                f.Close()
+                problem = fmt.Sprintf("stat %q: %v", localPath, err)
+            } else {
+                size = int(info.Size()) - offset
+                if length >= 0 && length < size {
+                    size = length
+                }
+                if size < 0 {
+                    size = 0
+                }
+                file = f
+            }
+        }
+        if problem != "" {
+            return Result.Err(Error("S3FileError", problem, None))
+        }
+        section: any = go!(io.NewSectionReader(file.(*os.File), int64(offset), int64(size)))
+        uploaded: Result[S3Part] = self.uploadPartReader(key, uploadId, partNumber, section, size)
+        go! {
+            file.(*os.File).Close()
+        }
+        return uploaded
+    }
+
     func uploadPart(self, key: str, uploadId: str, partNumber: int, data: str) -> Result[S3Part] {
         raw: bytes = go!([]byte(data))
         return self.uploadPart(key, uploadId, partNumber, raw)

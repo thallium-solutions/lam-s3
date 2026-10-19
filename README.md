@@ -292,6 +292,8 @@ package source and examples use `init`.
 | `open(key, offset=0, length=-1)` | `Result[S3ObjectReader]` | Streams the object (or a range) in chunks. |
 | `createMultipartUpload(key, contentType="application/octet-stream")` | `Result[str]` | Starts a multipart upload and returns its upload id. |
 | `uploadPart(key, uploadId, partNumber, data: bytes \| str \| list[int])` | `Result[S3Part]` | Uploads one part (1..10000). |
+| `uploadPartReader(key, uploadId, partNumber, reader: any, size)` | `Result[S3Part]` | Uploads one part streamed from a native `io.ReadSeeker` of exactly `size` bytes (re-read on SDK retries); `S3TypeError` for other values. |
+| `uploadPartFile(key, uploadId, partNumber, localPath, offset = 0, length = -1)` | `Result[S3Part]` | Uploads `length` bytes of a local file from `offset` (to the end when negative), streamed from disk; `S3FileError` when the file cannot be opened. |
 | `listParts(key, uploadId)` | `Result[list[S3Part]]` | Lists uploaded parts, following pagination. |
 | `completeMultipartUpload(key, uploadId, parts)` | `Result[bool]` | Assembles ascending parts into the object. |
 | `abortMultipartUpload(key, uploadId)` | `Result[bool]` | Discards an unfinished upload. |

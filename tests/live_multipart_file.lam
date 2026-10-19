@@ -1,0 +1,77 @@
+# Live: multipart parts streamed from a local file (uploadPartFile, a byte
+# range) and from a section reader (uploadPartReader) against a real
+# S3-compatible endpoint. Guarded by LAM_S3_LIVE_TESTS=1.
+#
+# expect: bucket=true
+# expect: size=5242893
+# expect: digest-matches=true
+# expect: live_multipart_file_ok
+
+from lamerrors import Result
+from lamos import Os
+from @lam/s3 import S3, S3Client, S3Object, S3Part
+
+go! {
+    import (
+        "bytes"
+        "crypto/sha256"
+        "encoding/hex"
+        "io"
+        "os"
+    )
+}
+
+const PartSize: int = 5242880
+
+#- Writes 5 MiB of a pattern plus a 13-byte tail to a temp file; returns
+   [path, sha256 hex]. -#
+func writeSource() -> list[str] {
+    out: list[str] = []
+    go! {
+        data := append(bytes.Repeat([]byte("0123456789abcdef"), PartSize/16), []byte("part-two-tail")...)
+        f, _ := os.CreateTemp("", "lam-s3-part-*.bin")
+        f.Write(data)
+        f.Close()
+        sum := sha256.Sum256(data)
+        out = append(out, f.Name(), hex.EncodeToString(sum[:]))
+    }
+    return out
+}
+
+func main() {
+    if Os.getenv("LAM_S3_LIVE_TESTS").unwrapOr("") != "1" {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
+        return
+    }
+    client: S3Client = S3Client.fromEnv()?
+    print(f"bucket={client.ensureBucket()?}")
+    source: list[str] = writeSource()
+    path: str = source[0]
+    key: str = "lam-s3-tests/live-multipart/from-file.bin"
+    uploadId: str = client.createMultipartUpload(key)?
+    first: S3Part = client.uploadPartFile(key, uploadId, 1, path, 0, PartSize)?
+    tailFile: any = None
+    tail: any = None
+    go! {
+        f, _ := os.Open(path)
+        tailFile = f
+        tail = io.NewSectionReader(f, int64(PartSize), 13)
+    }
+    second: S3Part = client.uploadPartReader(key, uploadId, 2, tail, 13)?
+    go! {
+        tailFile.(*os.File).Close()
+    }
+    _ = client.completeMultipartUpload(key, uploadId, [first, second])?
+    info: S3Object = client.stat(key)?
+    print(f"size={info.size}")
+    got: str = ""
+    data: bytes = client.getRangeBytes(key, 0, info.size)?
+    go! {
+        sum := sha256.Sum256(data)
+        got = hex.EncodeToString(sum[:])
+    }
+    print(f"digest-matches={got == source[1]}")
+    _ = client.delete(key)?
+    _ = Os.remove(path)
+    print("live_multipart_file_ok")
+}

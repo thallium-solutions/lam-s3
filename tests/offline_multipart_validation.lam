@@ -10,6 +10,10 @@
 # expect: negative-offset: S3ArgumentError
 # expect: zero-length: S3ArgumentError
 # expect: open-negative: S3ArgumentError
+# expect: reader-not-seekable: S3TypeError
+# expect: reader-negative-size: S3ArgumentError
+# expect: file-missing: S3FileError
+# expect: file-negative-offset: S3ArgumentError
 # expect: part=3:"abc":7
 # expect: max-parts=10000
 
@@ -36,6 +40,10 @@ func main() {
     print("negative-offset: " + kind(client.getRange("k", -1, 10)))
     print("zero-length: " + kind(client.getRangeBytes("k", 0, 0)))
     print("open-negative: " + kind(client.open("k", -5)))
+    print("reader-not-seekable: " + kind(client.uploadPartReader("k", "upload", 1, "not a reader", 4)))
+    print("reader-negative-size: " + kind(client.uploadPartReader("k", "upload", 1, None, -1)))
+    print("file-missing: " + kind(client.uploadPartFile("k", "upload", 1, "/nonexistent/lam-s3-part.bin")))
+    print("file-negative-offset: " + kind(client.uploadPartFile("k", "upload", 1, "/etc/hostname", -1)))
     part: S3Part = S3Part(3, "\"abc\"", 7)
     print(f"part={part.partNumber}:{part.etag}:{part.size}")
     print(f"max-parts={S3.maxParts()}")

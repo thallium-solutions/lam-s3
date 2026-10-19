@@ -2,6 +2,25 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## [2.3.0] - 2026-10-19
+
+### Added
+
+- `uploadPartReader(key, uploadId, partNumber, reader, size)`: uploads a
+  multipart part streamed from a native `io.ReadSeeker` (`*os.File`,
+  `io.SectionReader`) instead of a buffer in memory; the SDK re-reads it
+  from the start on retries. Values that are not an `io.ReadSeeker` give
+  `S3TypeError`, a negative size `S3ArgumentError`.
+- `uploadPartFile(key, uploadId, partNumber, localPath, offset = 0,
+  length = -1)`: uploads a byte range of a local file as one part, streamed
+  from disk (`S3FileError` when the file cannot be opened).
+
+### Testing
+
+- `offline_multipart_validation` covers the new argument errors;
+  `live_multipart_file` uploads parts from a file range and a section reader
+  and checks the object's size and SHA-256.
+
 ## [2.2.1] - 2026-10-18
 
 ### Changed
