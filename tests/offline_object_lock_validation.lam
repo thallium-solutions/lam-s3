@@ -1,0 +1,51 @@
+# Object Lock APIs validate their arguments before any network call.
+#
+# expect: mode-governance: GOVERNANCE
+# expect: mode-compliance: COMPLIANCE
+# expect: mode-bad: S3ArgumentError
+# expect: retention-empty-key: S3ArgumentError
+# expect: retention-bad-mode: S3ArgumentError
+# expect: retention-no-date: S3ArgumentError
+# expect: retention-date-without-mode: S3ArgumentError
+# expect: hold-empty-key: S3ArgumentError
+# expect: delete-version-empty: S3ArgumentError
+# expect: default-bad-days: S3ArgumentError
+# expect: default-bad-mode: S3ArgumentError
+# expect: retention-none: S3Retention(none) false
+# expect: retention-active: S3Retention(COMPLIANCE until 2000) true false
+# expect: config-defaults: false '' 0 0
+# expect: version-defaults: '' false false
+
+from lamerrors import Result, Error
+from @lam/s3 import S3, S3Client, S3Config, S3Retention, S3ObjectLockConfig, S3ObjectVersion
+
+func kind(r: Result) -> str {
+    if r.ok() {
+        return "ok"
+    }
+    err: Error = r.error
+    return err.kind
+}
+
+func main() {
+    print("mode-governance: " + S3.checkLockMode(" governance ").unwrap())
+    print("mode-compliance: " + S3.checkLockMode("COMPLIANCE").unwrap())
+    print("mode-bad: " + kind(S3.checkLockMode("worm")))
+    client: S3Client = S3Client.connect(S3Config("key", "secret", "http://127.0.0.1:1", "bucket", "us-east-1")).unwrap()
+    print("retention-empty-key: " + kind(client.setRetention("", "GOVERNANCE", 2000000000)))
+    print("retention-bad-mode: " + kind(client.setRetention("k", "forever", 2000000000)))
+    print("retention-no-date: " + kind(client.setRetention("k", "GOVERNANCE", 0)))
+    print("retention-date-without-mode: " + kind(client.setRetention("k", "", 2000000000)))
+    print("hold-empty-key: " + kind(client.setLegalHold("", true)))
+    print("delete-version-empty: " + kind(client.deleteVersion("k", "")))
+    print("default-bad-days: " + kind(client.setObjectLockDefault("GOVERNANCE", 0)))
+    print("default-bad-mode: " + kind(client.setObjectLockDefault("strict", 30)))
+    none: S3Retention = S3Retention()
+    print(f"retention-none: {none} {none.isActive(0)}")
+    active: S3Retention = S3Retention("COMPLIANCE", 2000)
+    print(f"retention-active: {active} {active.isActive(1999)} {active.isActive(2000)}")
+    cfg: S3ObjectLockConfig = S3ObjectLockConfig()
+    print(f"config-defaults: {cfg.enabled} '{cfg.defaultMode}' {cfg.defaultDays} {cfg.defaultYears}")
+    v: S3ObjectVersion = S3ObjectVersion()
+    print(f"version-defaults: '{v.versionId}' {v.isLatest} {v.isDeleteMarker}")
+}

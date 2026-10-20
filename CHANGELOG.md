@@ -2,6 +2,28 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## [2.4.0] - 2026-10-20
+
+### Added
+
+- S3 Object Lock: `createBucketWithObjectLock()`, `objectLockConfig()`
+  (`S3ObjectLockConfig`), `setObjectLockDefault(mode, days)`,
+  `setRetention(key, mode, untilUnix, bypassGovernance = false,
+  versionId = "")`, `retention(key, versionId = "")` (`S3Retention` with
+  `isActive(nowUnix)`), `setLegalHold(key, on, versionId = "")` and
+  `legalHold(key, versionId = "")`. Refused changes and deletions are
+  `S3ObjectLocked` errors; `S3.checkLockMode(mode)` validates modes.
+- Versioned buckets: `versions(prefix = "")` (`S3ObjectVersion`, delete
+  markers included, all pages) and `deleteVersion(key, versionId,
+  bypassGovernance = false)`.
+
+### Testing
+
+- `offline_object_lock_validation` (argument errors and value types);
+  `live_object_lock` (Object Lock bucket, default retention, governance
+  extend/shorten/bypass, legal hold blocking a bypass, compliance refusals
+  and expiry, delete markers, governance removal) passes on SeaweedFS 4.48.
+
 ## [2.3.1] - 2026-10-20
 
 ### Changed

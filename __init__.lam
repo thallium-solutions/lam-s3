@@ -70,6 +70,42 @@ go! {
         }
         return false
     }
+
+    // s3ErrorCode is the S3 error code of err ("" when it has none).
+    func s3ErrorCode(err error) string {
+        var apiErr smithy.APIError
+        if errors.As(err, &apiErr) {
+            return apiErr.ErrorCode()
+        }
+        return ""
+    }
+
+    // s3NoLockConfig: the bucket, object or version has no Object Lock
+    // configuration, retention or legal hold (AWS, MinIO and SeaweedFS
+    // spellings).
+    func s3NoLockConfig(err error) bool {
+        switch s3ErrorCode(err) {
+        case "ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration", "NoSuchObjectLegalHold", "InvalidRequest":
+            return true
+        }
+        return false
+    }
+
+    // s3LockErrorKind: S3ObjectLocked when the store refused a change
+    // because of a retention or legal hold, otherwise ``fallback``.
+    func s3LockErrorKind(err error, fallback string) string {
+        if s3ErrorCode(err) == "AccessDenied" {
+            return "S3ObjectLocked"
+        }
+        return fallback
+    }
+
+    func s3VersionPtr(versionId string) *string {
+        if versionId == "" {
+            return nil
+        }
+        return aws.String(versionId)
+    }
 }
 
 class S3Config {
@@ -134,6 +170,54 @@ class S3Object {
         self.lastModified: str = ""
         self.contentType: str = ""
         self.metadata: dict[str, str] = {}
+    }
+}
+
+class S3Retention {
+    #- The S3 Object Lock retention of one object version: ``mode`` is
+       ``GOVERNANCE``, ``COMPLIANCE`` or ``""`` (no retention) and
+       ``untilUnix`` the retain-until date (Unix seconds, 0 without one). -#
+    func init(self, mode: str = "", untilUnix: int = 0) {
+        self.mode: str = mode
+        self.untilUnix: int = untilUnix
+    }
+
+    #- True while the retention still protects the version at ``nowUnix``. -#
+    func isActive(self, nowUnix: int) -> bool {
+        return self.mode != "" and self.untilUnix > nowUnix
+    }
+
+    func __str__(self) -> str {
+        if self.mode == "" {
+            return "S3Retention(none)"
+        }
+        return f"S3Retention({self.mode} until {self.untilUnix})"
+    }
+}
+
+class S3ObjectLockConfig {
+    #- A bucket's Object Lock configuration. ``enabled`` is false for a bucket
+       created without Object Lock; ``defaultMode`` with ``defaultDays`` or
+       ``defaultYears`` is the retention new versions get when the writer
+       sets none. -#
+    func init(self) {
+        self.enabled: bool = false
+        self.defaultMode: str = ""
+        self.defaultDays: int = 0
+        self.defaultYears: int = 0
+    }
+}
+
+class S3ObjectVersion {
+    #- One version (or delete marker) of an object in a versioned bucket. -#
+    func init(self) {
+        self.key: str = ""
+        self.versionId: str = ""
+        self.size: int = 0
+        self.etag: str = ""
+        self.lastModifiedUnix: int = 0
+        self.isLatest: bool = false
+        self.isDeleteMarker: bool = false
     }
 }
 
@@ -828,6 +912,275 @@ class S3Client {
         return Result.Ok(true)
     }
 
+    # ── Object Lock (WORM retention and legal holds) ──────────────────
+
+    func createBucketWithObjectLock(self) -> Result[bool] {
+        #- Create the configured bucket with S3 Object Lock enabled (which
+           also enables versioning; neither can be turned off later).
+           ``Ok(false)`` when it already exists and is owned by these
+           credentials: check ``objectLockConfig().enabled`` then. -#
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            _, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(s.Cfg.Bucket), ObjectLockEnabledForBucket: aws.Bool(true)})
+            if err == nil {
+                return LAMMERGEIER.Result.Ok(true)
+            }
+            var owned *types.BucketAlreadyOwnedByYou
+            if errors.As(err, &owned) {
+                return LAMMERGEIER.Result.Ok(false)
+            }
+            return LAMMERGEIER.Result.Err(s3Error("S3BucketError", "create bucket %q with object lock: %v", s.Cfg.Bucket, err))
+        }
+    }
+
+    func objectLockConfig(self) -> Result[S3ObjectLockConfig] {
+        #- The bucket's Object Lock configuration (``enabled`` false when the
+           bucket has none). Use it at startup to check that a bucket meant
+           for WORM data really has Object Lock. -#
+        _ = self._ready()?
+        out: S3ObjectLockConfig = S3ObjectLockConfig()
+        failure: str = ""
+        go! {
+            client := s.Raw.(*s3.Client)
+            res, err := client.GetObjectLockConfiguration(context.Background(), &s3.GetObjectLockConfigurationInput{Bucket: aws.String(s.Cfg.Bucket)})
+            if err != nil {
+                if !s3NoLockConfig(err) {
+                    failure = fmt.Sprintf("object lock configuration of %q: %v", s.Cfg.Bucket, err)
+                }
+            } else if cfg := res.ObjectLockConfiguration; cfg != nil {
+                out.Enabled = cfg.ObjectLockEnabled == types.ObjectLockEnabledEnabled
+                if cfg.Rule != nil && cfg.Rule.DefaultRetention != nil {
+                    d := cfg.Rule.DefaultRetention
+                    out.DefaultMode = string(d.Mode)
+                    out.DefaultDays = int(aws.ToInt32(d.Days))
+                    out.DefaultYears = int(aws.ToInt32(d.Years))
+                }
+            }
+        }
+        if failure != "" {
+            return Result.Err(Error("S3ObjectLockError", failure, None))
+        }
+        return Result.Ok(out)
+    }
+
+    func setObjectLockDefault(self, mode: str, days: int) -> Result[bool] {
+        #- Sets the bucket's default retention (``mode`` GOVERNANCE or
+           COMPLIANCE for ``days`` >= 1), or removes it with ``mode`` ``""``
+           (Object Lock itself stays enabled). The bucket must have been
+           created with Object Lock. -#
+        upper: str = ""
+        if mode != "" {
+            upper = S3.checkLockMode(mode)?
+            if days < 1 {
+                return Result.Err(Error("S3ArgumentError", "setObjectLockDefault: days must be >= 1", None))
+            }
+        }
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            cfg := &types.ObjectLockConfiguration{ObjectLockEnabled: types.ObjectLockEnabledEnabled}
+            if upper != "" {
+                cfg.Rule = &types.ObjectLockRule{DefaultRetention: &types.DefaultRetention{Mode: types.ObjectLockRetentionMode(upper), Days: aws.Int32(int32(days))}}
+            }
+            _, err := client.PutObjectLockConfiguration(context.Background(), &s3.PutObjectLockConfigurationInput{Bucket: aws.String(s.Cfg.Bucket), ObjectLockConfiguration: cfg})
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error("S3ObjectLockError", "set default retention of %q: %v", s.Cfg.Bucket, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
+    func setRetention(self, key: str, mode: str, untilUnix: int, bypassGovernance: bool = false, versionId: str = "") -> Result[bool] {
+        #- Places, extends or changes the retention of ``key`` (its latest
+           version, or ``versionId``): ``mode`` GOVERNANCE or COMPLIANCE
+           until ``untilUnix``. ``mode`` ``""`` with ``untilUnix`` 0 removes
+           a governance retention. Shortening or removing a governance
+           retention needs ``bypassGovernance`` (and the
+           ``s3:BypassGovernanceRetention`` permission); a compliance
+           retention can only be extended. A refused change is
+           ``S3ObjectLocked``. -#
+        if key == "" {
+            return Result.Err(Error("S3ArgumentError", "setRetention: key must not be empty", None))
+        }
+        upper: str = ""
+        if mode != "" or untilUnix != 0 {
+            upper = S3.checkLockMode(mode)?
+            if untilUnix <= 0 {
+                return Result.Err(Error("S3ArgumentError", f"setRetention {key}: untilUnix must be a Unix time in the future", None))
+            }
+        }
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            retention := &types.ObjectLockRetention{}
+            if upper != "" {
+                retention.Mode = types.ObjectLockRetentionMode(upper)
+                retention.RetainUntilDate = aws.Time(time.Unix(int64(untilUnix), 0).UTC())
+            }
+            input := &s3.PutObjectRetentionInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key), VersionId: s3VersionPtr(versionId), Retention: retention}
+            if bypassGovernance {
+                input.BypassGovernanceRetention = aws.Bool(true)
+            }
+            _, err := client.PutObjectRetention(context.Background(), input)
+            if err != nil && upper == "" && (s3ErrorCode(err) == "InvalidRequest" || s3ErrorCode(err) == "MalformedXML") {
+                // Stores that reject an empty retention (SeaweedFS) remove
+                // it as a governance retention ending one second from now.
+                input.Retention = &types.ObjectLockRetention{Mode: types.ObjectLockRetentionModeGovernance, RetainUntilDate: aws.Time(time.Now().Add(time.Second).UTC())}
+                _, err = client.PutObjectRetention(context.Background(), input)
+            }
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error(s3LockErrorKind(err, "S3ObjectLockError"), "set retention of %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
+    func retention(self, key: str, versionId: str = "") -> Result[S3Retention] {
+        #- The retention of ``key`` (latest version, or ``versionId``); an
+           empty ``S3Retention`` when it has none. -#
+        _ = self._ready()?
+        out: S3Retention = S3Retention()
+        failure: str = ""
+        go! {
+            client := s.Raw.(*s3.Client)
+            res, err := client.GetObjectRetention(context.Background(), &s3.GetObjectRetentionInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key), VersionId: s3VersionPtr(versionId)})
+            if err != nil {
+                if !s3NoLockConfig(err) {
+                    failure = fmt.Sprintf("retention of %q: %v", key, err)
+                }
+            } else if res.Retention != nil {
+                out.Mode = string(res.Retention.Mode)
+                if res.Retention.RetainUntilDate != nil {
+                    out.UntilUnix = int(res.Retention.RetainUntilDate.Unix())
+                }
+            }
+        }
+        if failure != "" {
+            return Result.Err(Error("S3ObjectLockError", failure, None))
+        }
+        return Result.Ok(out)
+    }
+
+    func setLegalHold(self, key: str, on: bool, versionId: str = "") -> Result[bool] {
+        #- Places (``on``) or releases a legal hold on ``key`` (latest
+           version, or ``versionId``). A held version cannot be deleted, not
+           even with a governance bypass, until the hold is released. -#
+        if key == "" {
+            return Result.Err(Error("S3ArgumentError", "setLegalHold: key must not be empty", None))
+        }
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            status := types.ObjectLockLegalHoldStatusOff
+            if on {
+                status = types.ObjectLockLegalHoldStatusOn
+            }
+            _, err := client.PutObjectLegalHold(context.Background(), &s3.PutObjectLegalHoldInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key), VersionId: s3VersionPtr(versionId), LegalHold: &types.ObjectLockLegalHold{Status: status}})
+            if err != nil {
+                return LAMMERGEIER.Result.Err(s3Error(s3LockErrorKind(err, "S3ObjectLockError"), "set legal hold of %q: %v", key, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
+    func legalHold(self, key: str, versionId: str = "") -> Result[bool] {
+        #- Whether ``key`` (latest version, or ``versionId``) is under legal
+           hold. -#
+        _ = self._ready()?
+        held: bool = false
+        failure: str = ""
+        go! {
+            client := s.Raw.(*s3.Client)
+            res, err := client.GetObjectLegalHold(context.Background(), &s3.GetObjectLegalHoldInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key), VersionId: s3VersionPtr(versionId)})
+            if err != nil {
+                if !s3NoLockConfig(err) {
+                    failure = fmt.Sprintf("legal hold of %q: %v", key, err)
+                }
+            } else if res.LegalHold != nil {
+                held = res.LegalHold.Status == types.ObjectLockLegalHoldStatusOn
+            }
+        }
+        if failure != "" {
+            return Result.Err(Error("S3ObjectLockError", failure, None))
+        }
+        return Result.Ok(held)
+    }
+
+    func versions(self, prefix: str = "") -> Result[list[S3ObjectVersion]] {
+        #- Every version and delete marker under ``prefix`` (all pages),
+           newest first per key. In a versioned bucket (every Object Lock
+           bucket) ``delete`` only adds a delete marker: free the space with
+           ``deleteVersion``. -#
+        _ = self._ready()?
+        out: list[S3ObjectVersion] = []
+        failure: str = ""
+        go! {
+            client := s.Raw.(*s3.Client)
+            var keyMarker, versionMarker *string
+            for {
+                res, err := client.ListObjectVersions(context.Background(), &s3.ListObjectVersionsInput{Bucket: aws.String(s.Cfg.Bucket), Prefix: s3Ptr(prefix), KeyMarker: keyMarker, VersionIdMarker: versionMarker})
+                if err != nil {
+                    failure = fmt.Sprintf("list versions of %q: %v", prefix, err)
+                    break
+                }
+                for _, v := range res.Versions {
+                    item := NewS3ObjectVersion()
+                    item.Key = aws.ToString(v.Key)
+                    item.VersionId = aws.ToString(v.VersionId)
+                    item.Size = int(aws.ToInt64(v.Size))
+                    item.Etag = strings.Trim(aws.ToString(v.ETag), "\"")
+                    if v.LastModified != nil {
+                        item.LastModifiedUnix = int(v.LastModified.Unix())
+                    }
+                    item.IsLatest = aws.ToBool(v.IsLatest)
+                    out = append(out, item)
+                }
+                for _, m := range res.DeleteMarkers {
+                    item := NewS3ObjectVersion()
+                    item.Key = aws.ToString(m.Key)
+                    item.VersionId = aws.ToString(m.VersionId)
+                    if m.LastModified != nil {
+                        item.LastModifiedUnix = int(m.LastModified.Unix())
+                    }
+                    item.IsLatest = aws.ToBool(m.IsLatest)
+                    item.IsDeleteMarker = true
+                    out = append(out, item)
+                }
+                if !aws.ToBool(res.IsTruncated) {
+                    break
+                }
+                keyMarker, versionMarker = res.NextKeyMarker, res.NextVersionIdMarker
+            }
+        }
+        if failure != "" {
+            return Result.Err(Error("S3ListError", failure, None))
+        }
+        return Result.Ok(out)
+    }
+
+    func deleteVersion(self, key: str, versionId: str, bypassGovernance: bool = false) -> Result[bool] {
+        #- Permanently deletes one version (or delete marker) of ``key``.
+           A version under retention or legal hold is refused with
+           ``S3ObjectLocked``; ``bypassGovernance`` lifts a governance
+           retention (never a compliance one or a legal hold). -#
+        if key == "" or versionId == "" {
+            return Result.Err(Error("S3ArgumentError", "deleteVersion: key and versionId must not be empty", None))
+        }
+        _ = self._ready()?
+        go! {
+            client := s.Raw.(*s3.Client)
+            input := &s3.DeleteObjectInput{Bucket: aws.String(s.Cfg.Bucket), Key: aws.String(key), VersionId: aws.String(versionId)}
+            if bypassGovernance {
+                input.BypassGovernanceRetention = aws.Bool(true)
+            }
+            if _, err := client.DeleteObject(context.Background(), input); err != nil {
+                return LAMMERGEIER.Result.Err(s3Error(s3LockErrorKind(err, "S3DeleteError"), "delete version %s of %q: %v", versionId, key, err))
+            }
+            return LAMMERGEIER.Result.Ok(true)
+        }
+    }
+
     # ── ranged and streaming reads ────────────────────────────────────
 
     func getRangeBytes(self, key: str, offset: int, length: int) -> Result[bytes] {
@@ -1152,6 +1505,16 @@ class S3 {
             return Result.Err(Error("S3ArgumentError", f"multipart {key}: part number {partNumber} is outside 1..{S3.maxParts()}", None))
         }
         return Result.Ok(true)
+    }
+
+    static func checkLockMode(mode: str) -> Result[str] {
+        #- ``mode`` as S3 spells it (``GOVERNANCE`` / ``COMPLIANCE``, any
+           case accepted); ``S3ArgumentError`` for anything else. -#
+        upper: str = mode.trim().toUpper()
+        if upper != "GOVERNANCE" and upper != "COMPLIANCE" {
+            return Result.Err(Error("S3ArgumentError", f"object lock mode must be GOVERNANCE or COMPLIANCE, not '{mode}'", None))
+        }
+        return Result.Ok(upper)
     }
 
     static func checkRange(key: str, offset: int, length: int) -> Result[bool] {

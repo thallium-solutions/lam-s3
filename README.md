@@ -230,6 +230,52 @@ missing; `createBucket()` returns `Ok(false)` when it already exists and is
 owned by the same credentials; `ensureBucket()` creates it on demand, which is
 convenient for development and test environments.
 
+## Object Lock: WORM retention and legal holds
+
+S3 Object Lock keeps object versions from being deleted or overwritten until
+a retain-until date (**retention**) or until it is released (**legal
+hold**). It needs a bucket created with Object Lock, which also enables
+versioning (neither can be turned off later). Verified against AWS S3
+semantics and SeaweedFS 4.x; MinIO behaves the same.
+
+```lammergeier
+from @lam/s3 import S3Client, S3ObjectLockConfig, S3Retention
+from lamerrors import Result, Error
+from lamtime import Time
+
+func archive(client: S3Client, key: str, body: str) -> Result[bool] {
+    _ = client.createBucketWithObjectLock()?              # Ok(false) if it exists
+    lock: S3ObjectLockConfig = client.objectLockConfig()?
+    if not lock.enabled {
+        return Result.Err(Error("Config", "the bucket has no Object Lock"))
+    }
+    _ = client.put(key, body)?
+    _ = client.setRetention(key, "COMPLIANCE", Time.nowUnix() + 7 * 86400)?
+    _ = client.setLegalHold(key, true)?                   # until released
+    r: S3Retention = client.retention(key)?
+    print(f"{r.mode} until {r.untilUnix}, held={client.legalHold(key)?}")
+    return Result.Ok(true)
+}
+```
+
+- **Modes.** `GOVERNANCE` retention can be shortened or removed (and the
+  version deleted) with `bypassGovernance = true` by an identity that has
+  `s3:BypassGovernanceRetention`; `COMPLIANCE` retention can only be
+  extended, by anyone, and nothing deletes the version before the date. A
+  legal hold blocks deletion in both modes, bypass included.
+- **Versions.** In a versioned bucket `delete(key)` only adds a delete
+  marker; the locked data version stays (and is billed). `versions(prefix)`
+  lists versions and delete markers, `deleteVersion(key, versionId,
+  bypassGovernance = false)` removes one for good.
+- **Refusals** (deleting or shortening a locked version) are
+  `S3ObjectLocked` errors; other Object Lock failures are
+  `S3ObjectLockError`, argument errors `S3ArgumentError` before any request.
+- **Removing a governance retention**: `setRetention(key, "", 0, true)`.
+  Stores that reject an empty retention (SeaweedFS) get a governance
+  retention ending one second later instead.
+- `setObjectLockDefault(mode, days)` sets the bucket's default retention for
+  versions written without one (`""` removes it).
+
 ## Files, metadata, lists, and URLs
 
 ```lammergeier
@@ -298,6 +344,14 @@ package source and examples use `init`.
 | `completeMultipartUpload(key, uploadId, parts)` | `Result[bool]` | Assembles ascending parts into the object. |
 | `abortMultipartUpload(key, uploadId)` | `Result[bool]` | Discards an unfinished upload. |
 | `bucketExists()` / `createBucket()` / `ensureBucket()` | `Result[bool]` | Bucket checks and creation. |
+| `createBucketWithObjectLock()` | `Result[bool]` | Creates the bucket with Object Lock (and versioning); `Ok(false)` when it exists. |
+| `objectLockConfig()` | `Result[S3ObjectLockConfig]` | `enabled`, `defaultMode`, `defaultDays`, `defaultYears` (`enabled` false without Object Lock). |
+| `setObjectLockDefault(mode, days)` | `Result[bool]` | Default retention of new versions (`""` removes it). |
+| `setRetention(key, mode, untilUnix, bypassGovernance = false, versionId = "")` | `Result[bool]` | Places, extends, shortens (governance + bypass) or removes (`""`, `0`) a retention; `S3ObjectLocked` when refused. |
+| `retention(key, versionId = "")` | `Result[S3Retention]` | `mode` and `untilUnix` (empty when none); `isActive(nowUnix)`. |
+| `setLegalHold(key, on, versionId = "")` / `legalHold(key, versionId = "")` | `Result[bool]` | Places, releases or reads a legal hold. |
+| `versions(prefix = "")` | `Result[list[S3ObjectVersion]]` | Versions and delete markers (`key`, `versionId`, `size`, `etag`, `lastModifiedUnix`, `isLatest`, `isDeleteMarker`), all pages. |
+| `deleteVersion(key, versionId, bypassGovernance = false)` | `Result[bool]` | Permanently deletes one version or delete marker; `S3ObjectLocked` when locked or held. |
 | `get(key)` | `Result[str]` | Downloads an object body without hiding failures. |
 | `uploadFile(localPath, key, contentType="application/octet-stream")` | `Result[bool]` | Uploads a local file. |
 | `downloadFile(key, localPath)` | `Result[bool]` | Downloads to a local file. |
@@ -322,7 +376,9 @@ Argument errors (empty keys or upload ids, part numbers outside 1..10000,
 non-ascending parts, negative offsets) are returned as `S3ArgumentError`
 before any network call.
 
-`S3.publicUrl(publicEndpoint, key)` builds a URL without a client, and
+`S3.checkLockMode(mode)` normalizes an Object Lock mode (`S3ArgumentError`
+for anything but governance/compliance). `S3.publicUrl(publicEndpoint, key)`
+builds a URL without a client, and
 `S3.hasEnv()` checks whether required environment configuration is present.
 Public URL helpers always emit HTTPS and path-escape keys while preserving `/`.
 

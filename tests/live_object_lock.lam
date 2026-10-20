@@ -1,0 +1,126 @@
+# Live test: S3 Object Lock (WORM retention, legal holds, versions) on a
+# bucket created with Object Lock (<S3_BUCKET>-lock). Uses short
+# retentions so every object it writes can be deleted again.
+#
+# expect: bucket=true
+# expect: plain_bucket_disabled=true
+# expect: default=GOVERNANCE/1
+# expect: retention=GOVERNANCE true
+# expect: delete_marker_only=true
+# expect: delete_refused=S3ObjectLocked
+# expect: extend=true
+# expect: shorten_refused=S3ObjectLocked
+# expect: hold=true
+# expect: bypass_refused_under_hold=S3ObjectLocked
+# expect: release=false
+# expect: bypass_delete=true
+# expect: compliance_refused=S3ObjectLocked S3ObjectLocked
+# expect: compliance_expired_delete=true
+# expect: no_retention=S3Retention(none) false
+# expect: governance_removed=true true
+# expect: live_object_lock_ok
+
+from @lam/s3 import S3, S3Client, S3Config, S3Retention, S3ObjectLockConfig, S3ObjectVersion
+from lamerrors import Result, Error
+from lamtime import Time
+
+go! {
+    import (
+        "os"
+    )
+}
+
+func kind(r: Result) -> str {
+    if r.ok() {
+        return "ok"
+    }
+    err: Error = r.error
+    return err.kind
+}
+
+func versionsOf(client: S3Client, key: str) -> list[S3ObjectVersion] {
+    return [v for v in client.versions(key).unwrap() if v.key == key]
+}
+
+func dataVersion(client: S3Client, key: str) -> str {
+    for v in versionsOf(client, key) {
+        if not v.isDeleteMarker {
+            return v.versionId
+        }
+    }
+    return ""
+}
+
+func main() {
+    liveEnabled: bool = go!(os.Getenv("LAM_S3_LIVE_TESTS") == "1")
+    if not liveEnabled {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
+        return
+    }
+    if not S3.hasEnv() {
+        print("missing S3 env")
+        return
+    }
+    plain: S3Client = S3Client.fromEnv().unwrap()
+    _ = plain.ensureBucket()
+    cfg: S3Config = S3Config.fromEnv()
+    cfg.bucket = cfg.bucket + "-lock"
+    locked: S3Client = S3Client.connect(cfg).unwrap()
+    created: Result[bool] = locked.createBucketWithObjectLock()
+    lockCfg: S3ObjectLockConfig = locked.objectLockConfig().unwrap()
+    print(f"bucket={created.ok() and lockCfg.enabled}")
+    print(f"plain_bucket_disabled={not plain.objectLockConfig().unwrap().enabled}")
+    _ = locked.setObjectLockDefault("governance", 1).unwrap()
+    withDefault: S3ObjectLockConfig = locked.objectLockConfig().unwrap()
+    print(f"default={withDefault.defaultMode}/{withDefault.defaultDays}")
+    _ = locked.setObjectLockDefault("", 0).unwrap()
+
+    now: int = Time.nowUnix()
+    key: str = f"lam-s3-tests/lock/{now}.txt"
+    _ = locked.put(key, "write once").unwrap()
+    version: str = dataVersion(locked, key)
+    _ = locked.setRetention(key, "GOVERNANCE", now + 3600).unwrap()
+    r: S3Retention = locked.retention(key).unwrap()
+    print(f"retention={r.mode} {r.untilUnix == now + 3600}")
+
+    # A plain delete adds a delete marker; the data version stays.
+    _ = locked.delete(key).unwrap()
+    markers: int = len([v for v in versionsOf(locked, key) if v.isDeleteMarker])
+    print(f"delete_marker_only={markers == 1 and dataVersion(locked, key) == version}")
+    print(f"delete_refused={kind(locked.deleteVersion(key, version))}")
+    _ = locked.setRetention(key, "GOVERNANCE", now + 7200, false, version).unwrap()
+    print(f"extend={locked.retention(key, version).unwrap().untilUnix == now + 7200}")
+    print(f"shorten_refused={kind(locked.setRetention(key, 'GOVERNANCE', now + 600, false, version))}")
+
+    _ = locked.setLegalHold(key, true, version).unwrap()
+    print(f"hold={locked.legalHold(key, version).unwrap()}")
+    print(f"bypass_refused_under_hold={kind(locked.deleteVersion(key, version, true))}")
+    _ = locked.setLegalHold(key, false, version).unwrap()
+    print(f"release={locked.legalHold(key, version).unwrap()}")
+    print(f"bypass_delete={locked.deleteVersion(key, version, true).ok()}")
+    for v in versionsOf(locked, key) {
+        _ = locked.deleteVersion(key, v.versionId)
+    }
+
+    strict: str = f"lam-s3-tests/lock/{now}-compliance.txt"
+    _ = locked.put(strict, "regulated").unwrap()
+    strictVersion: str = dataVersion(locked, strict)
+    _ = locked.setRetention(strict, "COMPLIANCE", Time.nowUnix() + 3, false, strictVersion).unwrap()
+    print(f"compliance_refused={kind(locked.deleteVersion(strict, strictVersion, true))} {kind(locked.setRetention(strict, '', 0, true, strictVersion))}")
+    Time.sleepMs(4500)
+    print(f"compliance_expired_delete={locked.deleteVersion(strict, strictVersion).ok()}")
+
+    bare: str = f"lam-s3-tests/lock/{now}-bare.txt"
+    _ = locked.put(bare, "no retention").unwrap()
+    none: S3Retention = locked.retention(bare).unwrap()
+    print(f"no_retention={none} {locked.legalHold(bare).unwrap()}")
+    bareVersion: str = dataVersion(locked, bare)
+    _ = locked.setRetention(bare, "GOVERNANCE", Time.nowUnix() + 3600).unwrap()
+    removed: bool = locked.setRetention(bare, "", 0, true).ok()
+    Time.sleepMs(1500)
+    print(f"governance_removed={removed} {locked.deleteVersion(bare, bareVersion).ok()}")
+    for v in versionsOf(locked, bare) {
+        _ = locked.deleteVersion(bare, v.versionId)
+    }
+    print("live_object_lock_ok")
+}

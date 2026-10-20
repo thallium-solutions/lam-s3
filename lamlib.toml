@@ -1,6 +1,6 @@
 [library]
 name = "@lam/s3"
-version = "2.3.1"
+version = "2.4.0"
 description = "S3-compatible object storage client for Lammergeier"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]
