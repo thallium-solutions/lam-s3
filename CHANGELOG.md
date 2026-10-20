@@ -2,6 +2,21 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## [2.5.0] - 2026-10-20
+
+### Added
+
+- `S3Config.blockPrivateNetworks`: the client refuses to connect to
+  loopback, private, link-local (cloud metadata), CGNAT, reserved and
+  IPv6 ULA/link-local/NAT64 addresses, checked on every connection after
+  DNS resolution, and ignores environment proxies. For endpoints supplied
+  by users. `S3.isPublicAddress(ip)` exposes the check.
+
+### Testing
+
+- `offline_block_private_networks`: literal and named private endpoints are
+  refused at connection time, default clients unaffected, address table.
+
 ## [2.4.0] - 2026-10-20
 
 ### Added

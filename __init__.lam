@@ -13,12 +13,16 @@ go! {
         "errors"
         "fmt"
         "io"
+        "net"
+        "net/http"
         "net/url"
         "os"
         "strings"
+        "syscall"
         "time"
 
         "github.com/aws/aws-sdk-go-v2/aws"
+        awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
         "github.com/aws/aws-sdk-go-v2/config"
         "github.com/aws/aws-sdk-go-v2/credentials"
         "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -100,6 +104,60 @@ go! {
         return fallback
     }
 
+    var s3BlockedNets = func() []*net.IPNet {
+        var out []*net.IPNet
+        for _, cidr := range []string{
+            "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+            "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/3",
+            "::/128", "::1/128", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8",
+        } {
+            _, n, _ := net.ParseCIDR(cidr)
+            out = append(out, n)
+        }
+        return out
+    }()
+
+    // s3PublicIP: not loopback, private, link-local (cloud metadata),
+    // CGNAT, benchmarking, multicast, reserved or unspecified.
+    func s3PublicIP(ip net.IP) bool {
+        if ip == nil {
+            return false
+        }
+        if v4 := ip.To4(); v4 != nil {
+            ip = v4
+        }
+        for _, n := range s3BlockedNets {
+            if n.Contains(ip) {
+                return false
+            }
+        }
+        return true
+    }
+
+    // s3GuardedHTTPClient connects only to public addresses, checked after
+    // DNS resolution on every connection (no DNS-rebinding window) and
+    // without environment proxies (they would hide the destination).
+    func s3GuardedHTTPClient() *awshttp.BuildableClient {
+        dialer := &net.Dialer{
+            Timeout:   30 * time.Second,
+            KeepAlive: 30 * time.Second,
+            Control: func(network, address string, c syscall.RawConn) error {
+                host, _, err := net.SplitHostPort(address)
+                if err != nil {
+                    return err
+                }
+                if !s3PublicIP(net.ParseIP(host)) {
+                    return fmt.Errorf("S3 endpoint address %s is private or reserved (blockPrivateNetworks)", host)
+                }
+                return nil
+            },
+        }
+        return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+            tr.Proxy = nil
+            tr.DialContext = dialer.DialContext
+        })
+    }
+
     func s3VersionPtr(versionId string) *string {
         if versionId == "" {
             return nil
@@ -117,6 +175,11 @@ class S3Config {
         self.region: str = region
         self.bucket: str = bucket
         self.usePathStyle: bool = usePathStyle
+        #- Refuse connections to private, loopback, link-local (cloud
+           metadata), CGNAT and reserved addresses, checked on every
+           connection after DNS resolution; environment proxies are not
+           used. For endpoints supplied by users (bring-your-own-bucket). -#
+        self.blockPrivateNetworks: bool = false
     }
 
     static func fromEnv() -> S3Config {
@@ -365,6 +428,9 @@ class S3Client {
             client.Raw = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
                 o.BaseEndpoint = aws.String(endpoint)
                 o.UsePathStyle = cfg.UsePathStyle
+                if cfg.BlockPrivateNetworks {
+                    o.HTTPClient = s3GuardedHTTPClient()
+                }
             })
             client.Connected = true
             return LAMMERGEIER.Result.Ok(client)
@@ -1505,6 +1571,16 @@ class S3 {
             return Result.Err(Error("S3ArgumentError", f"multipart {key}: part number {partNumber} is outside 1..{S3.maxParts()}", None))
         }
         return Result.Ok(true)
+    }
+
+    static func isPublicAddress(address: str) -> bool {
+        #- Whether ``address`` (an IP literal) may be reached by a client with
+           ``blockPrivateNetworks``. -#
+        out: bool = false
+        go! {
+            out = s3PublicIP(net.ParseIP(strings.Trim(address, "[]")))
+        }
+        return out
     }
 
     static func checkLockMode(mode: str) -> Result[str] {

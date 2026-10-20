@@ -230,6 +230,26 @@ missing; `createBucket()` returns `Ok(false)` when it already exists and is
 owned by the same credentials; `ensureBucket()` creates it on demand, which is
 convenient for development and test environments.
 
+## Endpoints supplied by users (SSRF protection)
+
+Applications that let their users bring their own bucket must not let a
+crafted endpoint reach internal services (cloud metadata at
+`169.254.169.254`, databases on private networks, `localhost`). Set
+`blockPrivateNetworks` on the configuration:
+
+```lammergeier
+cfg: S3Config = S3Config(keyId, secret, userEndpoint, userBucket, "eu-west-1")
+cfg.blockPrivateNetworks = true
+client: S3Client = S3Client.connect(cfg)?
+```
+
+Every connection is then checked **after DNS resolution**, so a name that
+resolves (or later re-resolves) to a private address is refused as well:
+loopback, RFC 1918, link-local, CGNAT (`100.64.0.0/10`), benchmarking,
+multicast, reserved, unspecified, IPv6 ULA/link-local and NAT64 ranges.
+Environment proxies are not used by such clients (a proxy would hide the
+destination). `S3.isPublicAddress(ip)` exposes the same check.
+
 ## Object Lock: WORM retention and legal holds
 
 S3 Object Lock keeps object versions from being deleted or overwritten until
@@ -376,7 +396,9 @@ Argument errors (empty keys or upload ids, part numbers outside 1..10000,
 non-ascending parts, negative offsets) are returned as `S3ArgumentError`
 before any network call.
 
-`S3.checkLockMode(mode)` normalizes an Object Lock mode (`S3ArgumentError`
+`S3Config.blockPrivateNetworks` (default `false`) refuses private and
+reserved addresses at connection time; `S3.isPublicAddress(ip)` is the same
+check. `S3.checkLockMode(mode)` normalizes an Object Lock mode (`S3ArgumentError`
 for anything but governance/compliance). `S3.publicUrl(publicEndpoint, key)`
 builds a URL without a client, and
 `S3.hasEnv()` checks whether required environment configuration is present.
