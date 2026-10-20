@@ -1,6 +1,6 @@
 [library]
 name = "@lam/s3"
-version = "2.3.0"
+version = "2.3.1"
 description = "S3-compatible object storage client for Lammergeier"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]
@@ -8,7 +8,7 @@ repository = "https://github.com/thallium-solutions/lam-s3"
 homepage = "https://github.com/thallium-solutions/lam-s3"
 
 [compatibility]
-lamc = ">=1.18, <3"
+lamc = ">=1.18, <4"
 
 [scripts]
 test = "python3 tests/run_lams3_tests.py"

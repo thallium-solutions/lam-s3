@@ -2,6 +2,12 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## [2.3.1] - 2026-10-20
+
+### Changed
+
+- Compatible with `lamc` 3.x: `compatibility.lamc = ">=1.18, <4"` (test runner too).
+
 ## [2.3.0] - 2026-10-19
 
 ### Added
