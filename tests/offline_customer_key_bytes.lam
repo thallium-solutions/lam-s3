@@ -1,0 +1,44 @@
+# SSE-C keys are 32 bytes, whatever characters their bytes happen to form:
+# random keys often contain valid multi-byte UTF-8 sequences, so the length
+# check must count bytes (len(bytes(raw))), not str characters (lamc 4.14+).
+# expect: random keys accepted: 200/200
+# expect: utf-8 key (16 x c3a9) accepted: true
+# expect: high bytes key (32 x ff) accepted: true
+# expect: 33 bytes as 32 characters refused: true
+# expect: 31 bytes refused: true
+# expect: 16 bytes refused: true
+# expect: odd hex refused: true
+# expect: empty key gives a client without key: true
+
+from @lam/s3 import S3Client
+from lamcrypto import Crypto
+from lamerrors import Result
+
+func accepted(client: S3Client, hexKey: str) -> bool {
+    keyed: Result[S3Client] = client.withCustomerKey(hexKey)
+    return keyed.ok() and keyed.unwrap().hasCustomerKey()
+}
+
+func main() {
+    plain: S3Client = S3Client()
+
+    ok: int = 0
+    for i in range(200) {
+        hexKey: str = Crypto.randomHex(32).unwrap()
+        if accepted(plain, hexKey) {
+            ok += 1
+        } else {
+            print(f"refused random key {hexKey}")
+        }
+    }
+    print(f"random keys accepted: {ok}/200")
+
+    print(f"utf-8 key (16 x c3a9) accepted: {accepted(plain, 'c3a9' * 16)}")
+    print(f"high bytes key (32 x ff) accepted: {accepted(plain, 'FF' * 32)}")
+    print(f"33 bytes as 32 characters refused: {not accepted(plain, 'c3a9' + '41' * 31)}")
+    print(f"31 bytes refused: {not accepted(plain, 'ab' * 31)}")
+    print(f"16 bytes refused: {not accepted(plain, 'c3a9' * 8)}")
+    print(f"odd hex refused: {not accepted(plain, 'abc')}")
+    empty: S3Client = plain.withCustomerKey("").unwrap()
+    print(f"empty key gives a client without key: {not empty.hasCustomerKey()}")
+}

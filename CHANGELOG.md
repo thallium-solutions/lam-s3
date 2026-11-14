@@ -2,6 +2,24 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## [2.5.2] - 2026-11-14
+
+### Fixed
+
+- `withCustomerKey(hexKey)` checks that the decoded SSE-C key is 32 bytes
+  with `len(bytes(raw))`. It used `len(raw)` on the decoded `str`, which
+  counts characters from lamc 4.14 on (strings are sequences of
+  characters): a random key whose bytes formed multi-byte UTF-8 sequences
+  (most of them) was refused as too short, and a 33-byte key of 32
+  characters was accepted. Correct with lamc 4.13 and 4.14.
+
+### Testing
+
+- `offline_customer_key_bytes`: 200 random keys, a key made of UTF-8
+  sequences (`c3a9` x 16), high bytes, and 31/33-byte keys; it fails with
+  lamc 4.14 without the fix. `offline_composed_v2_pipeline` measures its
+  object size with `len(bytes(...))`.
+
 ## [2.5.1] - 2026-11-03
 
 ### Changed

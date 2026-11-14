@@ -397,7 +397,8 @@ class S3Client {
             return Result.Ok(clone)
         }
         raw: str = Bytes.hexDecode(hexKey.trim().toLower())?
-        if len(raw) != 32 {
+        # The key is binary: count its bytes, not the characters they may form.
+        if len(bytes(raw)) != 32 {
             return Result.Err(Error("S3ArgumentError", "withCustomerKey: the key must be 32 bytes (64 hex characters)", None))
         }
         go! {

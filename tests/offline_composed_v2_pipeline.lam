@@ -119,7 +119,7 @@ func main() {
 
     object: S3Object = S3Object()
     object.key = objectKey
-    object.size = len(envelope)
+    object.size = len(bytes(envelope))
     object.contentType = "application/json"
     object.metadata["request_id"] = str(ctx.get("request_id"))
     Test.assertTrue(object.key == objectKey and object.size > 0 and object.metadata["request_id"] == "req-77", "14 object model holds offline metadata")
