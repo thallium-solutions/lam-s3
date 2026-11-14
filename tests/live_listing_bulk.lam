@@ -1,0 +1,171 @@
+# Live: listings and bulk deletes beyond one S3 page, key and body edge
+# cases, presigned uploads, missing objects and buckets.
+#
+#   * 1005 objects (written by 15 async tasks) are all listed: `list`/`keys`
+#     follow continuation tokens (2.5.3 fix: they returned the first 1000);
+#     a nested prefix lists only its objects.
+#   * `deleteMany` of 1005 keys deletes them all: S3 accepts at most 1000
+#     keys per request, so the keys are sent in batches (2.5.3 fix: the
+#     request was refused).
+#   * Keys with spaces, `+`, `%`, `?`, `#`, non-ASCII characters and an emoji
+#     round-trip through put/get/stat/list/copy; an empty body; every byte
+#     value through `bytes`.
+#   * A presigned PUT made by a plain HTTP client is readable with `get`.
+#   * Missing objects: `get`/`stat` errors, `exists` false, `getRange` past
+#     the end; a missing bucket: `bucketExists` false.
+#
+# expect: written: 1005
+# expect: listed: 1005 keys=1005 sorted=true nested=5
+# expect: deleteMany: 1005 left=0
+# expect: odd keys: 7/7 listed=7 copies=7
+# expect: empty body: true size=0
+# expect: all bytes: 256 true
+# expect: presigned put: 200 true type=text/csv
+# expect: missing: get=S3GetError stat=S3HeadError exists=false
+# expect: range past end: S3GetError
+# expect: missing bucket: false
+# expect: cleanup: 0
+# expect: live_listing_bulk_ok
+
+from @lam/s3 import S3, S3Client, S3Config, S3Object
+from lamerrors import Result
+from lamtime import Time
+
+go! {
+    import (
+        "net/http"
+        "os"
+        "strings"
+    )
+
+    func s3LivePut(url string, body string, contentType string) int {
+        req, err := http.NewRequest(http.MethodPut, url, strings.NewReader(body))
+        if err != nil {
+            return -1
+        }
+        req.Header.Set("Content-Type", contentType)
+        resp, err := http.DefaultClient.Do(req)
+        if err != nil {
+            return -2
+        }
+        resp.Body.Close()
+        return resp.StatusCode
+    }
+
+    func s3LiveAllBytes() []byte {
+        raw := make([]byte, 256)
+        for i := range raw {
+            raw[i] = byte(i)
+        }
+        return raw
+    }
+}
+
+const Prefix: str = "lam-s3-tests/live-listing-bulk/"
+
+func kind(r: Result) -> str {
+    if r.ok() {
+        return "ok"
+    }
+    return r.error.kind
+}
+
+func pad(i: int) -> str {
+    text: str = str(i)
+    return "0" * (4 - len(text)) + text
+}
+
+async func writeRange(client: S3Client, start: int, count: int) -> Result[int] {
+    for i in range(start, start + count) {
+        name: str = f"bulk/{pad(i)}.txt" if i % 201 != 0 else f"bulk/nested/{pad(i)}.txt"
+        _ = client.put(Prefix + name, f"object {i}")?
+    }
+    return Result.Ok(count)
+}
+
+func run() -> Result[bool] {
+    client: S3Client = S3Client.fromEnv()?
+    _ = client.ensureBucket()?
+    stale: list[str] = client.keys(Prefix)?
+    _ = client.deleteMany(stale)?
+
+    tasks = [writeRange(client, start, 67) for start in range(0, 1005, 67)]
+    written: int = 0
+    for task in tasks {
+        r: Result[int] = await task
+        written += r?
+    }
+    print(f"written: {written}")
+    listed: list[S3Object] = client.list(Prefix + "bulk/")?
+    keys: list[str] = client.keys(Prefix + "bulk/")?
+    nested: list[str] = client.keys(Prefix + "bulk/nested/")?
+    print(f"listed: {len(listed)} keys={len(keys)} sorted={keys == sorted(keys)} nested={len(nested)}")
+    deleted: int = client.deleteMany(keys)?
+    print(f"deleteMany: {deleted} left={len(client.keys(Prefix + 'bulk/')?)}")
+
+    odd: list[str] = ["with space.txt", "plus+sign.txt", "percent%20literal.txt", "question?mark.txt", "hash#tag.txt", "Grüße/東京.txt", "emoji-🦅.txt"]
+    roundTrips: int = 0
+    for name in odd {
+        _ = client.put(Prefix + "odd/" + name, f"body of {name}", "text/plain; charset=utf-8")?
+        info: S3Object = client.stat(Prefix + "odd/" + name)?
+        if client.get(Prefix + "odd/" + name)? == f"body of {name}" and info.size == len(bytes(f"body of {name}")) {
+            roundTrips++
+        }
+        _ = client.copy(Prefix + "odd/" + name, Prefix + "odd-copy/" + name)?
+    }
+    oddListed: list[str] = client.keys(Prefix + "odd/")?
+    copies: list[str] = client.keys(Prefix + "odd-copy/")?
+    print(f"odd keys: {roundTrips}/{len(odd)} listed={len([k for k in oddListed if k[len(Prefix) + 4:] in odd])} copies={len(copies)}")
+
+    _ = client.put(Prefix + "empty.txt", "")?
+    print(f"empty body: {client.get(Prefix + 'empty.txt')? == ''} size={client.stat(Prefix + 'empty.txt')?.size}")
+
+    raw: bytes = bytes("")
+    go! {
+        raw = s3LiveAllBytes()
+    }
+    _ = client.put(Prefix + "bytes.bin", raw)?
+    back: bytes = client.getRangeBytes(Prefix + "bytes.bin", 0, 256)?
+    print(f"all bytes: {len(back)} {back == raw}")
+
+    url: str = client.presignPut(Prefix + "presigned.csv", "text/csv", 120)?
+    csv: str = "a,b\n1,2\n"
+    status: int = 0
+    go! {
+        status = s3LivePut(url, csv, "text/csv")
+    }
+    uploaded: str = client.get(Prefix + "presigned.csv")?
+    print(f"presigned put: {status} {uploaded == csv} type={client.stat(Prefix + 'presigned.csv')?.contentType}")
+
+    missing: str = Prefix + "does-not-exist.txt"
+    print(f"missing: get={kind(client.get(missing))} stat={kind(client.stat(missing))} exists={client.exists(missing)?}")
+    print(f"range past end: {kind(client.getRange(Prefix + 'empty.txt', 10, 5))}")
+
+    cfg: S3Config = S3Config.fromEnv()
+    cfg.bucket = cfg.bucket + "-missing-" + str(Time.nowUnixNano())
+    other: S3Client = S3Client.connect(cfg)?
+    print(f"missing bucket: {other.bucketExists()?}")
+
+    leftovers: list[str] = client.keys(Prefix)?
+    _ = client.deleteMany(leftovers)?
+    print(f"cleanup: {len(client.keys(Prefix)?)}")
+    return Result.Ok(true)
+}
+
+func main() {
+    liveEnabled: bool = go!(os.Getenv("LAM_S3_LIVE_TESTS") == "1")
+    if not liveEnabled {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
+        return
+    }
+    if not S3.hasEnv() {
+        print("missing S3 env")
+        return
+    }
+    r: Result[bool] = run()
+    if not r.ok() {
+        print(f"unexpected: {r.error}")
+        return
+    }
+    print("live_listing_bulk_ok")
+}

@@ -1,0 +1,163 @@
+# Live, cross-feature: a `BackupJob` class backs up a set of generated
+# files into the bucket concurrently (one async task per file): small files
+# with `put`, the large one as a two-part multipart upload whose parts are
+# uploaded by two tasks, then verifies every object (size, content type,
+# SHA-256 of the downloaded body), restores them with `downloadFile`, moves
+# the manifest, and reports failures through `?` and `do/catch`.
+# Comprehensions summarise the results. Guarded by LAM_S3_LIVE_TESTS=1.
+#
+# expect: uploaded: 6 objects, 0 failures
+# expect: multipart: parts=2 size=5243904
+# expect: verified: 6/6 sizes and digests
+# expect: restored: 6/6 files identical
+# expect: manifest moved: true old=false
+# expect: missing restore: S3GetError
+# expect: cleanup: 0
+# expect: live_backup_ok
+
+from @lam/s3 import S3, S3Client, S3Object, S3Part
+from lamerrors import Result, Error
+from lamhash import Hash
+from lamos import Os
+from lamtime import Time
+
+go! {
+    import "os"
+}
+
+const Prefix: str = "lam-s3-tests/live-backup/"
+const PartSize: int = 5242880
+
+class BackupItem {
+    func init(self, name: str, body: str, contentType: str) {
+        self.name: str = name
+        self.body: str = body
+        self.contentType: str = contentType
+        self.digest: str = Hash.sha256(body)
+    }
+}
+
+class BackupJob {
+    func init(self, client: S3Client, prefix: str) {
+        self.client: S3Client = client
+        self.prefix: str = prefix
+    }
+
+    func key(self, item: BackupItem) -> str {
+        return self.prefix + item.name
+    }
+
+    func uploadSmall(self, item: BackupItem) -> Result[bool] {
+        return self.client.put(self.key(item), item.body, item.contentType)
+    }
+
+    func uploadLarge(self, item: BackupItem) -> Result[int] {
+        uploadId: str = self.client.createMultipartUpload(self.key(item), item.contentType)?
+        raw: bytes = bytes(item.body)
+        first = partTask(self, item, uploadId, 1, raw[:PartSize])
+        second = partTask(self, item, uploadId, 2, raw[PartSize:])
+        one: Result[S3Part] = await first
+        two: Result[S3Part] = await second
+        parts: list[S3Part] = [one?, two?]
+        _ = self.client.completeMultipartUpload(self.key(item), uploadId, parts)?
+        return Result.Ok(len(parts))
+    }
+
+    func verify(self, item: BackupItem) -> Result[bool] {
+        info: S3Object = self.client.stat(self.key(item))?
+        body: str = self.client.get(self.key(item))?
+        if info.size != len(bytes(item.body)) or Hash.sha256(body) != item.digest {
+            return Result.Err(Error("BackupMismatch", f"{item.name}: {info.size} bytes"))
+        }
+        return Result.Ok(info.contentType.startsWith(item.contentType.split(";")[0]))
+    }
+
+    func restore(self, item: BackupItem, directory: str) -> Result[bool] {
+        path: str = directory + "/" + item.name.replace("/", "_")
+        _ = self.client.downloadFile(self.key(item), path)?
+        copy: str = Os.readFile(path)?
+        return Result.Ok(Hash.sha256(copy) == item.digest)
+    }
+}
+
+async func partTask(job: BackupJob, item: BackupItem, uploadId: str, number: int, data: bytes) -> Result[S3Part] {
+    return job.client.uploadPart(job.key(item), uploadId, number, data)
+}
+
+async func uploadTask(job: BackupJob, item: BackupItem) -> Result[bool] {
+    if len(bytes(item.body)) > PartSize {
+        _ = job.uploadLarge(item)?
+        return Result.Ok(true)
+    }
+    return job.uploadSmall(item)
+}
+
+func run() -> Result[bool] {
+    client: S3Client = S3Client.fromEnv()?
+    _ = client.ensureBucket()?
+    stale: list[str] = client.keys(Prefix)?
+    _ = client.deleteMany(stale)?
+
+    job: BackupJob = BackupJob(client, Prefix)
+    items: list[BackupItem] = [
+        BackupItem("manifest.json", "{\"files\": 5, \"owner\": \"Zoë\"}", "application/json"),
+        BackupItem("notes/readme.txt", "Grüße aus 東京 🦅\n" * 50, "text/plain; charset=utf-8"),
+        BackupItem("data/empty.bin", "", "application/octet-stream"),
+        BackupItem("data/table.csv", "id,name\n" + "\n".join([f"{i},name-{i}" for i in range(200)]), "text/csv"),
+        BackupItem("data/binary.bin", "ÿþ" * 512, "application/octet-stream"),
+        BackupItem("large/archive.dat", "0123456789abcdef" * 327744, "application/octet-stream"),
+    ]
+    tasks = [uploadTask(job, item) for item in items]
+    outcomes: list[Result[bool]] = []
+    for task in tasks {
+        outcomes.append(await task)
+    }
+    print(f"uploaded: {len([o for o in outcomes if o.ok()])} objects, {len([o for o in outcomes if not o.ok()])} failures")
+    large: S3Object = client.stat(Prefix + "large/archive.dat")?
+    print(f"multipart: parts=2 size={large.size}")
+
+    verified: list[bool] = [job.verify(item).ok() for item in items]
+    print(f"verified: {len([v for v in verified if v])}/{len(items)} sizes and digests")
+
+    directory: str = Os.tempDir() + "/lam-s3-backup-" + str(Time.nowUnixNano())
+    _ = Os.mkdir(directory)?
+    restored: int = 0
+    for item in items {
+        if job.restore(item, directory)? {
+            restored++
+        }
+    }
+    print(f"restored: {restored}/{len(items)} files identical")
+
+    _ = client.move(Prefix + "manifest.json", Prefix + "archive/manifest.json", "application/json")?
+    print(f"manifest moved: {client.exists(Prefix + 'archive/manifest.json')?} old={client.exists(Prefix + 'manifest.json')?}")
+
+    do {
+        _ = job.restore(BackupItem("never-uploaded.txt", "x", "text/plain"), directory)?
+        print("missing restore: restored")
+    } catch err {
+        print(f"missing restore: {err.kind}")
+    }
+    _ = Os.removeAll(directory)
+    _ = client.deleteMany(client.keys(Prefix)?)?
+    print(f"cleanup: {len(client.keys(Prefix)?)}")
+    return Result.Ok(true)
+}
+
+func main() {
+    liveEnabled: bool = go!(os.Getenv("LAM_S3_LIVE_TESTS") == "1")
+    if not liveEnabled {
+        print("skip: set LAM_S3_LIVE_TESTS=1 to run live S3 tests")
+        return
+    }
+    if not S3.hasEnv() {
+        print("missing S3 env")
+        return
+    }
+    r: Result[bool] = run()
+    if not r.ok() {
+        print(f"unexpected: {r.error}")
+        return
+    }
+    print("live_backup_ok")
+}

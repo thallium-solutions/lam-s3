@@ -376,11 +376,11 @@ package source and examples use `init`.
 | `uploadFile(localPath, key, contentType="application/octet-stream")` | `Result[bool]` | Uploads a local file. |
 | `downloadFile(key, localPath)` | `Result[bool]` | Downloads to a local file. |
 | `exists(key)` | `Result[bool]` | Returns `Ok(false)` only for missing keys; other HEAD failures are errors. |
-| `list(prefix="")` | `Result[list[S3Object]]` | Lists object metadata. |
+| `list(prefix="")` | `Result[list[S3Object]]` | Lists object metadata, all pages. |
 | `keys(prefix="")` | `Result[list[str]]` | Projects a listing to keys. |
 | `stat(key)` | `Result[S3Object]` | Reads object metadata with HEAD. |
 | `delete(key)` | `Result[bool]` | Deletes one object. |
-| `deleteMany(keys)` | `Result[int]` | Deletes objects and returns their count. |
+| `deleteMany(keys)` | `Result[int]` | Deletes objects (in requests of up to 1000 keys) and returns their count. |
 | `copy(sourceKey, destKey, contentType="")` | `Result[bool]` | Copies within the configured bucket. |
 | `move(sourceKey, destKey, contentType="")` | `Result[bool]` | Copies, then deletes the source. |
 | `presignGet(key, expiresSeconds=900)` | `Result[str]` | Generates a temporary GET URL. |
@@ -442,7 +442,8 @@ python3 tests/run_lams3_tests.py --verbose
 ```
 
 Live tests (`tests/live_*.lam`: roundtrip, multipart, ranged and streaming
-reads) are opt-in, use isolated `lam-s3-tests/` prefixes, and must never be run
+reads, object lock, SSE-C, listings and bulk deletes beyond one page, a
+concurrent backup) are opt-in, use isolated `lam-s3-tests/` prefixes, and must never be run
 as part of offline verification. They work against any S3-compatible endpoint,
 including a disposable local one:
 

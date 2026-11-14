@@ -601,23 +601,30 @@ class S3Client {
         }
         go! {
             client := s.Raw.(*s3.Client)
-            objects := make([]types.ObjectIdentifier, 0, len(keys))
-            for _, key := range keys {
-                objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
-            }
-            out, err := client.DeleteObjects(context.Background(), &s3.DeleteObjectsInput{
-                Bucket: aws.String(s.Cfg.Bucket),
-                Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
-            })
-            if err != nil {
-                return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %d objects: %v", len(keys), err))
-            }
-            if len(out.Errors) > 0 {
-                msg := "unknown delete error"
-                if out.Errors[0].Message != nil {
-                    msg = *out.Errors[0].Message
+            // DeleteObjects accepts at most 1000 keys per request.
+            for start := 0; start < len(keys); start += 1000 {
+                end := start + 1000
+                if end > len(keys) {
+                    end = len(keys)
                 }
-                return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %d objects: %s", len(keys), msg))
+                objects := make([]types.ObjectIdentifier, 0, end-start)
+                for _, key := range keys[start:end] {
+                    objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
+                }
+                out, err := client.DeleteObjects(context.Background(), &s3.DeleteObjectsInput{
+                    Bucket: aws.String(s.Cfg.Bucket),
+                    Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+                })
+                if err != nil {
+                    return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %d objects: %v", len(keys), err))
+                }
+                if len(out.Errors) > 0 {
+                    msg := "unknown delete error"
+                    if out.Errors[0].Message != nil {
+                        msg = *out.Errors[0].Message
+                    }
+                    return LAMMERGEIER.Result.Err(s3Error("S3DeleteError", "delete %d objects: %s", len(keys), msg))
+                }
             }
             return LAMMERGEIER.Result.Ok(len(keys))
         }
@@ -647,15 +654,21 @@ class S3Client {
         _ = self._ready()?
         go! {
             client := s.Raw.(*s3.Client)
-            out, err := client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+            // Every page: one ListObjectsV2 response holds at most 1000 keys.
+            contents := []types.Object{}
+            paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
                 Bucket: aws.String(s.Cfg.Bucket),
                 Prefix: aws.String(prefix),
             })
-            if err != nil {
-                return LAMMERGEIER.Result.Err(s3Error("S3ListError", "list %q: %v", prefix, err))
+            for paginator.HasMorePages() {
+                out, err := paginator.NextPage(context.Background())
+                if err != nil {
+                    return LAMMERGEIER.Result.Err(s3Error("S3ListError", "list %q: %v", prefix, err))
+                }
+                contents = append(contents, out.Contents...)
             }
-            result := make([]*S3Object, 0, len(out.Contents))
-            for _, item := range out.Contents {
+            result := make([]*S3Object, 0, len(contents))
+            for _, item := range contents {
                 obj := NewS3Object()
                 if item.Key != nil {
                     obj.Key = *item.Key

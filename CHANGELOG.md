@@ -2,6 +2,32 @@
 
 All notable changes to `@lam/s3` are documented here.
 
+## [2.5.3] - 2026-11-14
+
+### Fixed
+
+- `list(prefix)` and `keys(prefix)` return every object: they read only the
+  first `ListObjectsV2` page, so a prefix with more than 1000 objects was
+  silently truncated to 1000. They follow continuation tokens now.
+- `deleteMany(keys)` deletes more than 1000 keys: S3 accepts at most 1000
+  keys per `DeleteObjects` request and refused the whole call
+  (`InvalidArgument`); the keys are sent in batches of 1000.
+
+### Tests
+
+- `tests/live_listing_bulk.lam`: 1005 objects written by 15 async tasks are
+  all listed and deleted (both fixes; it fails without them), keys with
+  spaces, `+`, `%`, `?`, `#`, non-ASCII characters and emoji through
+  put/get/stat/list/copy, an empty body, every byte value through `bytes`, a
+  presigned PUT made by a plain HTTP client, missing objects, a read past the
+  end and a missing bucket.
+- `tests/live_backup_composed.lam`: a `BackupJob` class uploading files
+  concurrently (small ones with `put`, a large one as a multipart upload
+  whose two parts are uploaded by two tasks), verifying sizes, content types
+  and SHA-256 digests, restoring with `downloadFile`, moving the manifest, and
+  reporting errors through `?` and `do/catch`.
+- Both ran against a disposable local SeaweedFS 4.48 with all live tests.
+
 ## [2.5.2] - 2026-11-14
 
 ### Fixed
